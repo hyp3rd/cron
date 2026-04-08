@@ -8,6 +8,8 @@ import (
 )
 
 func TestWithLocation(t *testing.T) {
+	t.Parallel()
+
 	c := New(WithLocation(time.UTC))
 	if c.location != time.UTC {
 		t.Errorf("expected UTC, got %v", c.location)
@@ -15,7 +17,10 @@ func TestWithLocation(t *testing.T) {
 }
 
 func TestWithParser(t *testing.T) {
-	var parser = NewParser(Dow)
+	t.Parallel()
+
+	parser := NewParser(Dow)
+
 	c := New(WithParser(parser))
 	if c.parser != parser {
 		t.Error("expected provided parser")
@@ -23,17 +28,22 @@ func TestWithParser(t *testing.T) {
 }
 
 func TestWithVerboseLogger(t *testing.T) {
+	t.Parallel()
+
 	var buf syncWriter
-	var logger = log.New(&buf, "", log.LstdFlags)
-	c := New(WithLogger(VerbosePrintfLogger(logger)))
-	if c.logger.(printfLogger).logger != logger {
+
+	logger := log.New(&buf, "", log.LstdFlags)
+
+	cron := New(WithLogger(VerbosePrintfLogger(logger)))
+	if requireType[printfLogger](t, cron.logger).logger != logger {
 		t.Error("expected provided logger")
 	}
 
-	c.AddFunc("@every 1s", func() {})
-	c.Start()
+	mustAddFunc(t, cron, "@every 1s", func() {})
+	cron.Start()
 	time.Sleep(OneSecond)
-	c.Stop()
+	cron.Stop()
+
 	out := buf.String()
 	if !strings.Contains(out, "schedule,") ||
 		!strings.Contains(out, "run,") {

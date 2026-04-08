@@ -6,17 +6,21 @@
 Cron V3 has been released!
 
 To download the specific tagged release, run:
+
 ```bash
 go get github.com/robfig/cron/v3@v3.0.0
 ```
+
 Import it in your program as:
+
 ```go
 import "github.com/robfig/cron/v3"
 ```
+
 It requires Go 1.11 or later due to usage of Go Modules.
 
 Refer to the documentation here:
-http://godoc.org/github.com/robfig/cron
+<http://godoc.org/github.com/robfig/cron>
 
 The rest of this document describes the the advances in v3 and a list of
 breaking changes for users that wish to upgrade from an earlier version.
@@ -47,7 +51,7 @@ New features:
   year field (optional in Quartz) is not supported.
 
 - Extensible, key/value logging via an interface that complies with
-  the https://github.com/go-logr/logr project.
+  the <https://github.com/go-logr/logr> project.
 
 - The new Chain & JobWrapper types allow you to install "interceptors" to add
   cross-cutting behavior like the following:
@@ -65,15 +69,17 @@ It is backwards incompatible with both v1 and v2. These updates are required:
 
   UPDATING: To retain the old behavior, construct your Cron with a custom
   parser:
+
 ```go
 // Seconds field, required
 cron.New(cron.WithSeconds())
 
 // Seconds field, optional
 cron.New(cron.WithParser(cron.NewParser(
-	cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor,
+ cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor,
 )))
 ```
+
 - The Cron type now accepts functional options on construction rather than the
   previous ad-hoc behavior modification mechanisms (setting a field, calling a setter).
 
@@ -92,16 +98,19 @@ cron.New(cron.WithParser(cron.NewParser(
   has been removed to accommodate the more general JobWrapper type.
 
   UPDATING: To opt into panic recovery and configure the panic logger:
+  
 ```go
 cron.New(cron.WithChain(
-  cron.Recover(logger),  // or use cron.DefaultLogger
+  cron.Recover(logger),  // or use cron.DefaultLogger()
 ))
 ```
-- In adding support for https://github.com/go-logr/logr, `cron.WithVerboseLogger` was
+
+- In adding support for <https://github.com/go-logr/logr>, `cron.WithVerboseLogger` was
   removed, since it is duplicative with the leveled logging.
 
   UPDATING: Callers should use `WithLogger` and specify a logger that does not
   discard `Info` logs. For convenience, one is provided that wraps `*log.Logger`:
+
 ```go
 cron.New(
   cron.WithLogger(cron.VerbosePrintfLogger(logger)))
