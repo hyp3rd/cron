@@ -247,7 +247,7 @@ formatters:
     gofumpt:
       # Module path which contains the source code being formatted.
       # Default: ""
-      module-path: github.com/robfig/cron/v3
+      module-path: github.com/hyp3rd/cron/v4
       # Choose whether to use the extra rules.
       # Default: false
       extra-rules: true
@@ -257,7 +257,7 @@ formatters:
       # with the given prefixes are grouped after 3rd-party packages.
       # Default: []
       local-prefixes:
-        - github.com/robfig/cron/v3
+        - github.com/hyp3rd/cron/v4
 
     golines:
       # Target maximum line length.

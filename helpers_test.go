@@ -1,15 +1,16 @@
 package cron
 
 import (
+	"context"
 	"testing"
 	"time"
 )
 
-func testParserWithSeconds() Parser {
-	return NewParser(Second | Minute | Hour | Dom | Month | DowOptional | Descriptor)
+func testParserWithSeconds() SpecParser {
+	return NewSpecParser(Second | Minute | Hour | Dom | Month | DowOptional | Descriptor)
 }
 
-func mustAddFunc(t *testing.T, cron *Cron, spec string, cmd func()) EntryID {
+func mustAddFunc(t *testing.T, cron *Cron, spec string, cmd func(context.Context) error) EntryID {
 	t.Helper()
 
 	entryID, err := cron.AddFunc(spec, cmd)

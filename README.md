@@ -1,134 +1,137 @@
-[![GoDoc](http://godoc.org/github.com/robfig/cron?status.png)](http://godoc.org/github.com/robfig/cron)
-[![Build Status](https://travis-ci.org/robfig/cron.svg?branch=master)](https://travis-ci.org/robfig/cron)
-
 # cron
 
-Cron V3 has been released!
+[![Go Reference](https://pkg.go.dev/badge/github.com/hyp3rd/cron/v4.svg)](https://pkg.go.dev/github.com/hyp3rd/cron/v4)
+[![CI](https://github.com/hyp3rd/cron/actions/workflows/go.yml/badge.svg)](https://github.com/hyp3rd/cron/actions/workflows/go.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-To download the specific tagged release, run:
+A fast, well-tested cron expression parser and job scheduler for Go.
+
+This is a modernized fork of the abandoned
+[`robfig/cron/v3`](https://github.com/robfig/cron). It ships an idiomatic
+Go 1.26+ API with `context.Context`, `log/slog`, and a testable `Clock`
+interface.
+
+## Install
 
 ```bash
-go get github.com/robfig/cron/v3@v3.0.0
+go get github.com/hyp3rd/cron/v4@latest
 ```
 
-Import it in your program as:
+## Quick start
 
 ```go
-import "github.com/robfig/cron/v3"
+package main
+
+import (
+    "context"
+    "fmt"
+    "os"
+    "os/signal"
+
+    "github.com/hyp3rd/cron/v4"
+)
+
+func main() {
+    c := cron.New()
+
+    c.AddFunc("@every 5s", func(ctx context.Context) error {
+        fmt.Println("tick")
+
+        return nil
+    })
+
+    ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+    defer stop()
+
+    c.Start(ctx)
+
+    <-ctx.Done()
+    c.Stop(context.Background())
+}
 ```
 
-It requires Go 1.11 or later due to usage of Go Modules.
+## Features
 
-Refer to the documentation here:
-<http://godoc.org/github.com/robfig/cron>
+- **Standard 5-field cron expressions** (minute, hour, dom, month, dow) plus
+  optional seconds via `WithSeconds()`.
+- **`context.Context` throughout** — `Start`, `Run`, `Stop`, and every `Job`
+  receive a context for cancellation and deadlines.
+- **`log/slog` logging** — structured, leveled logging out of the box. Default
+  level is `slog.LevelWarn` to keep the scheduler quiet.
+- **`Clock` interface** — inject a fake clock via `WithClock` for deterministic,
+  zero-`time.Sleep` tests.
+- **Job wrappers** — `Recover`, `SkipIfStillRunning`, `DelayIfStillRunning`,
+  and custom `JobWrapper` chains.
+- **Thread-safe** — add, remove, and inspect entries while the scheduler is
+  running.
 
-The rest of this document describes the the advances in v3 and a list of
-breaking changes for users that wish to upgrade from an earlier version.
+## Cron expressions
 
-## Upgrading to v3 (June 2019)
+| Field | Allowed values | Special characters |
+|---|---|---|
+| Minutes | 0-59 | `*` `/` `,` `-` |
+| Hours | 0-23 | `*` `/` `,` `-` |
+| Day of month | 1-31 | `*` `/` `,` `-` `?` |
+| Month | 1-12 or JAN-DEC | `*` `/` `,` `-` |
+| Day of week | 0-6 or SUN-SAT | `*` `/` `,` `-` `?` |
 
-cron v3 is a major upgrade to the library that addresses all outstanding bugs,
-feature requests, and rough edges. It is based on a merge of master which
-contains various fixes to issues found over the years and the v2 branch which
-contains some backwards-incompatible features like the ability to remove cron
-jobs. In addition, v3 adds support for Go Modules, cleans up rough edges like
-the timezone support, and fixes a number of bugs.
+### Predefined schedules
 
-New features:
+| Entry       | Equivalent |
+|------------ |----------- |
+| `@yearly`   | `0 0 1 1 *` |
+| `@monthly`  | `0 0 1 * *` |
+| `@weekly`   | `0 0 * * 0` |
+| `@daily`    | `0 0 * * *` |
+| `@hourly`   | `0 * * * *` |
 
-- Support for Go modules. Callers must now import this library as
-  `github.com/robfig/cron/v3`, instead of `gopkg.in/...`
+### Intervals
 
-- Fixed bugs:
-  - 0f01e6b parser: fix combining of Dow and Dom (#70)
-  - dbf3220 adjust times when rolling the clock forward to handle non-existent midnight (#157)
-  - eeecf15 spec_test.go: ensure an error is returned on 0 increment (#144)
-  - 70971dc cron.Entries(): update request for snapshot to include a reply channel (#97)
-  - 1cba5e6 cron: fix: removing a job causes the next scheduled job to run too late (#206)
-
-- Standard cron spec parsing by default (first field is "minute"), with an easy
-  way to opt into the seconds field (quartz-compatible). Although, note that the
-  year field (optional in Quartz) is not supported.
-
-- Extensible, key/value logging via an interface that complies with
-  the <https://github.com/go-logr/logr> project.
-
-- The new Chain & JobWrapper types allow you to install "interceptors" to add
-  cross-cutting behavior like the following:
-  - Recover any panics from jobs
-  - Delay a job's execution if the previous run hasn't completed yet
-  - Skip a job's execution if the previous run hasn't completed yet
-  - Log each job's invocations
-  - Notification when jobs are completed
-
-It is backwards incompatible with both v1 and v2. These updates are required:
-
-- The v1 branch accepted an optional seconds field at the beginning of the cron
-  spec. This is non-standard and has led to a lot of confusion. The new default
-  parser conforms to the standard as described by [the Cron wikipedia page].
-
-  UPDATING: To retain the old behavior, construct your Cron with a custom
-  parser:
-
-```go
-// Seconds field, required
-cron.New(cron.WithSeconds())
-
-// Seconds field, optional
-cron.New(cron.WithParser(cron.NewParser(
- cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor,
-)))
+```text
+@every 1h30m
 ```
 
-- The Cron type now accepts functional options on construction rather than the
-  previous ad-hoc behavior modification mechanisms (setting a field, calling a setter).
+### Time zones
 
-  UPDATING: Code that sets Cron.ErrorLogger or calls Cron.SetLocation must be
-  updated to provide those values on construction.
-
-- CRON_TZ is now the recommended way to specify the timezone of a single
-  schedule, which is sanctioned by the specification. The legacy "TZ=" prefix
-  will continue to be supported since it is unambiguous and easy to do so.
-
-  UPDATING: No update is required.
-
-- By default, cron will no longer recover panics in jobs that it runs.
-  Recovering can be surprising (see issue #192) and seems to be at odds with
-  typical behavior of libraries. Relatedly, the `cron.WithPanicLogger` option
-  has been removed to accommodate the more general JobWrapper type.
-
-  UPDATING: To opt into panic recovery and configure the panic logger:
-  
 ```go
-cron.New(cron.WithChain(
-  cron.Recover(logger),  // or use cron.DefaultLogger()
+cron.New(cron.WithLocation(time.UTC))
+// or per-schedule:
+c.AddFunc("CRON_TZ=Asia/Tokyo 0 6 * * ?", myJob)
+```
+
+## Job wrappers / Chain
+
+```go
+c := cron.New(cron.WithChain(
+    cron.Recover(logger),
+    cron.SkipIfStillRunning(logger),
 ))
 ```
 
-- In adding support for <https://github.com/go-logr/logr>, `cron.WithVerboseLogger` was
-  removed, since it is duplicative with the leveled logging.
-
-  UPDATING: Callers should use `WithLogger` and specify a logger that does not
-  discard `Info` logs. For convenience, one is provided that wraps `*log.Logger`:
+Or per-job:
 
 ```go
-cron.New(
-  cron.WithLogger(cron.VerbosePrintfLogger(logger)))
+wrapped := cron.NewChain(cron.Recover(logger)).Then(myJob)
 ```
 
-### Background - Cron spec format
+## Testing with a fake clock
 
-There are two cron spec formats in common usage:
+The `Clock` interface lets you drive the scheduler deterministically:
 
-- The "standard" cron format, described on [the Cron wikipedia page] and used by
-  the cron Linux system utility.
+```go
+c := cron.New(cron.WithClock(fakeClock))
+```
 
-- The cron format used by [the Quartz Scheduler], commonly used for scheduled
-  jobs in Java software
+See `clock.go` for the interface definition.
 
-[the Cron wikipedia page]: https://en.wikipedia.org/wiki/Cron
-[the Quartz Scheduler]: http://www.quartz-scheduler.org/documentation/quartz-2.3.0/tutorials/tutorial-lesson-06.html
+## Migration from robfig/cron/v3
 
-The original version of this package included an optional "seconds" field, which
-made it incompatible with both of these formats. Now, the "standard" format is
-the default format accepted, and the Quartz format is opt-in.
+See [MIGRATION.md](MIGRATION.md) for a step-by-step upgrade guide.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+MIT - see [LICENSE](LICENSE).

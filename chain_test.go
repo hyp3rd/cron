@@ -1,8 +1,8 @@
 package cron
 
 import (
-	"io"
-	"log"
+	"context"
+	"errors"
 	"reflect"
 	"sync"
 	"testing"
@@ -23,19 +23,22 @@ const (
 func appendingJob(slice *[]int, value int) Job {
 	var m sync.Mutex
 
-	return FuncJob(func() {
+	return FuncJob(func(_ context.Context) error {
 		m.Lock()
 
 		*slice = append(*slice, value)
 		m.Unlock()
+
+		return nil
 	})
 }
 
 func appendingWrapper(slice *[]int, value int) JobWrapper {
 	return func(job Job) Job {
-		return FuncJob(func() {
-			appendingJob(slice, value).Run()
-			job.Run()
+		return FuncJob(func(ctx context.Context) error {
+			_ = appendingJob(slice, value).Run(ctx) //nolint:errcheck // test helper
+
+			return job.Run(ctx)
 		})
 	}
 }
@@ -51,7 +54,10 @@ func TestChain(t *testing.T) {
 		append4 = appendingJob(&nums, 4)
 	)
 
-	NewChain(append1, append2, append3).Then(append4).Run()
+	err := NewChain(append1, append2, append3).Then(append4).Run(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if !reflect.DeepEqual(nums, []int{1, 2, 3, 4}) {
 		t.Error("unexpected order of calls:", nums)
@@ -61,7 +67,7 @@ func TestChain(t *testing.T) {
 func TestChainRecover(t *testing.T) {
 	t.Parallel()
 
-	panickingJob := FuncJob(func() {
+	panickingJob := FuncJob(func(_ context.Context) error {
 		panic("panickingJob panics")
 	})
 
@@ -74,24 +80,27 @@ func TestChainRecover(t *testing.T) {
 			}
 		}()
 
-		NewChain().Then(panickingJob).
-			Run()
+		_ = NewChain().Then(panickingJob).Run(context.Background()) //nolint:errcheck // panics before returning
 	})
 
-	t.Run("Recovering JobWrapper recovers", func(t *testing.T) {
+	t.Run("Recovering JobWrapper recovers and returns ErrPanic", func(t *testing.T) {
 		t.Parallel()
 
-		NewChain(Recover(PrintfLogger(log.New(io.Discard, "", 0)))).
+		err := NewChain(Recover(DiscardLogger())).
 			Then(panickingJob).
-			Run()
+			Run(context.Background())
+		if !errors.Is(err, ErrPanic) {
+			t.Errorf("expected ErrPanic, got %v", err)
+		}
 	})
 
 	t.Run("composed with the *IfStillRunning wrappers", func(t *testing.T) {
 		t.Parallel()
 
-		NewChain(Recover(PrintfLogger(log.New(io.Discard, "", 0)))).
+		//nolint:errcheck // testing recovery, error not relevant
+		_ = NewChain(Recover(DiscardLogger())).
 			Then(panickingJob).
-			Run()
+			Run(context.Background())
 	})
 }
 
@@ -102,7 +111,7 @@ type countJob struct {
 	delay   time.Duration
 }
 
-func (j *countJob) Run() {
+func (j *countJob) Run(_ context.Context) error {
 	j.m.Lock()
 	j.started++
 	j.m.Unlock()
@@ -110,6 +119,8 @@ func (j *countJob) Run() {
 	j.m.Lock()
 	j.done++
 	j.m.Unlock()
+
+	return nil
 }
 
 func (j *countJob) Started() int {
@@ -128,6 +139,12 @@ func (j *countJob) Done() int {
 	return j.done
 }
 
+func runAsync(job Job) {
+	go func() {
+		_ = job.Run(context.Background()) //nolint:errcheck // fire-and-forget test helper
+	}()
+}
+
 func TestChainDelayIfStillRunning(t *testing.T) {
 	t.Parallel()
 
@@ -137,7 +154,7 @@ func TestChainDelayIfStillRunning(t *testing.T) {
 		var jobCounter countJob
 
 		wrappedJob := NewChain(DelayIfStillRunning(DiscardLogger())).Then(&jobCounter)
-		go wrappedJob.Run()
+		runAsync(wrappedJob)
 
 		time.Sleep(jobCompletionWait)
 
@@ -154,11 +171,11 @@ func TestChainDelayIfStillRunning(t *testing.T) {
 		wrappedJob := NewChain(DelayIfStillRunning(DiscardLogger())).Then(&jobCounter)
 
 		go func() {
-			go wrappedJob.Run()
+			runAsync(wrappedJob)
 
 			time.Sleep(time.Millisecond)
 
-			go wrappedJob.Run()
+			runAsync(wrappedJob)
 		}()
 
 		time.Sleep(twoJobCompletionWait)
@@ -177,11 +194,11 @@ func TestChainDelayIfStillRunning(t *testing.T) {
 		wrappedJob := NewChain(DelayIfStillRunning(DiscardLogger())).Then(&jobCounter)
 
 		go func() {
-			go wrappedJob.Run()
+			runAsync(wrappedJob)
 
 			time.Sleep(time.Millisecond)
 
-			go wrappedJob.Run()
+			runAsync(wrappedJob)
 		}()
 
 		// After 5ms, the first job is still in progress, and the second job was
@@ -219,7 +236,7 @@ func testChainSkipRunsImmediately(t *testing.T) {
 	var jobCounter countJob
 
 	wrappedJob := NewChain(SkipIfStillRunning(DiscardLogger())).Then(&jobCounter)
-	go wrappedJob.Run()
+	runAsync(wrappedJob)
 
 	time.Sleep(jobCompletionWait)
 
@@ -236,11 +253,11 @@ func testChainSkipSecondRunImmediate(t *testing.T) {
 	wrappedJob := NewChain(SkipIfStillRunning(DiscardLogger())).Then(&jobCounter)
 
 	go func() {
-		go wrappedJob.Run()
+		runAsync(wrappedJob)
 
 		time.Sleep(time.Millisecond)
 
-		go wrappedJob.Run()
+		runAsync(wrappedJob)
 	}()
 
 	time.Sleep(twoJobCompletionWait)
@@ -259,11 +276,11 @@ func testChainSkipSecondRunSkipped(t *testing.T) {
 	wrappedJob := NewChain(SkipIfStillRunning(DiscardLogger())).Then(&jobCounter)
 
 	go func() {
-		go wrappedJob.Run()
+		runAsync(wrappedJob)
 
 		time.Sleep(time.Millisecond)
 
-		go wrappedJob.Run()
+		runAsync(wrappedJob)
 	}()
 
 	time.Sleep(waitForFirstJob)
@@ -290,7 +307,7 @@ func testChainSkipRapidFire(t *testing.T) {
 
 	wrappedJob := NewChain(SkipIfStillRunning(DiscardLogger())).Then(&jobCounter)
 	for range [rapidFireJobRuns]struct{}{} {
-		go wrappedJob.Run()
+		runAsync(wrappedJob)
 	}
 
 	time.Sleep(rapidFireCompletionWait)
@@ -313,8 +330,8 @@ func testChainSkipDifferentJobs(t *testing.T) {
 	wrappedJob2 := chain.Then(&secondJob)
 
 	for range [rapidFireJobRuns]struct{}{} {
-		go wrappedJob1.Run()
-		go wrappedJob2.Run()
+		runAsync(wrappedJob1)
+		runAsync(wrappedJob2)
 	}
 
 	time.Sleep(independentJobsWait)

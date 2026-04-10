@@ -243,7 +243,7 @@ func TestParseSchedule(t *testing.T) {
 func TestOptionalSecondSchedule(t *testing.T) {
 	t.Parallel()
 
-	parser := NewParser(SecondOptional | Minute | Hour | Dom | Month | Dow | Descriptor)
+	parser := NewSpecParser(SecondOptional | Minute | Hour | Dom | Month | Dow | Descriptor)
 	entries := []struct {
 		expr     string
 		expected Schedule
@@ -437,7 +437,7 @@ func TestStandardSpecSchedule(t *testing.T) {
 func TestNoDescriptorParser(t *testing.T) {
 	t.Parallel()
 
-	parser := NewParser(Minute | Hour)
+	parser := NewSpecParser(Minute | Hour)
 
 	_, err := parser.Parse("@every 1m")
 	if err == nil {

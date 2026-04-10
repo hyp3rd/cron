@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"log/slog"
 	"time"
 )
 
@@ -17,13 +18,13 @@ func WithLocation(loc *time.Location) Option {
 // WithSeconds overrides the parser used for interpreting job schedules to
 // include a seconds field as the first one.
 func WithSeconds() Option {
-	return WithParser(NewParser(
+	return WithParser(NewSpecParser(
 		Second | Minute | Hour | Dom | Month | Dow | Descriptor,
 	))
 }
 
 // WithParser overrides the parser used for interpreting job schedules.
-func WithParser(p ScheduleParser) Option {
+func WithParser(p Parser) Option {
 	return func(c *Cron) {
 		c.parser = p
 	}
@@ -38,8 +39,16 @@ func WithChain(wrappers ...JobWrapper) Option {
 }
 
 // WithLogger uses the provided logger.
-func WithLogger(logger Logger) Option {
+func WithLogger(logger *slog.Logger) Option {
 	return func(c *Cron) {
 		c.logger = logger
+	}
+}
+
+// WithClock overrides the clock used by the cron instance. It is intended
+// primarily for tests that want to drive the scheduler deterministically.
+func WithClock(clock Clock) Option {
+	return func(c *Cron) {
+		c.clock = clock
 	}
 }

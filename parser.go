@@ -79,12 +79,12 @@ func defaults() []string {
 	}
 }
 
-// Parser that can be configured.
-type Parser struct {
+// SpecParser that can be configured.
+type SpecParser struct {
 	options ParseOption
 }
 
-// NewParser creates a Parser with custom options.
+// NewSpecParser creates a SpecParser with custom options.
 //
 // It panics if more than one Optional is given, since it would be impossible to
 // correctly infer which optional is provided or missing in general.
@@ -92,17 +92,17 @@ type Parser struct {
 // Examples
 //
 //	// Standard parser without descriptors
-//	specParser := NewParser(Minute | Hour | Dom | Month | Dow)
+//	specParser := NewSpecParser(Minute | Hour | Dom | Month | Dow)
 //	sched, err := specParser.Parse("0 0 15 */3 *")
 //
 //	// Same as above, just excludes time fields
-//	specParser := NewParser(Dom | Month | Dow)
+//	specParser := NewSpecParser(Dom | Month | Dow)
 //	sched, err := specParser.Parse("15 */3 *")
 //
 //	// Same as above, just makes Dow optional
-//	specParser := NewParser(Dom | Month | DowOptional)
+//	specParser := NewSpecParser(Dom | Month | DowOptional)
 //	sched, err := specParser.Parse("15 */3")
-func NewParser(options ParseOption) Parser {
+func NewSpecParser(options ParseOption) SpecParser {
 	optionals := 0
 	if options&DowOptional > 0 {
 		optionals++
@@ -116,20 +116,20 @@ func NewParser(options ParseOption) Parser {
 		panic("multiple optionals may not be configured")
 	}
 
-	return Parser{options}
+	return SpecParser{options}
 }
 
-// NewStandardParser returns a Parser configured to parse standard 5-field crontab specs.
-func NewStandardParser() Parser {
-	return NewParser(
+// NewStandardParser returns a SpecParser configured to parse standard 5-field crontab specs.
+func NewStandardParser() SpecParser {
+	return NewSpecParser(
 		Minute | Hour | Dom | Month | Dow | Descriptor,
 	)
 }
 
 // Parse returns a new crontab schedule representing the given spec.
 // It returns a descriptive error if the spec is not valid.
-// It accepts crontab specs and features configured by NewParser.
-func (p Parser) Parse(spec string) (Schedule, error) {
+// It accepts crontab specs and features configured by NewSpecParser.
+func (p SpecParser) Parse(spec string) (Schedule, error) {
 	if len(spec) == 0 {
 		return nil, errEmptySpec
 	}
