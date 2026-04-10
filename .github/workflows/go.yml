@@ -46,7 +46,8 @@ jobs:
             - name: Tidy check
               run: |
                   go mod tidy
-                  git diff --exit-code go.mod go.sum
+                  git diff --exit-code go.mod
+                  test ! -f go.sum || git diff --exit-code go.sum
 
             - name: Verify
               run: go mod verify
