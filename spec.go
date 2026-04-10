@@ -391,7 +391,7 @@ func enumerateBits(bitset uint64, bnd bounds) string {
 	var parts []string
 
 	for idx := bnd.min; idx <= bnd.max; idx++ {
-		if hasBit(bitset, int(idx)) { //nolint:gosec // G115: idx is bounded by [0,63]
+		if bitset&(uint64(1)<<idx) != 0 {
 			parts = append(parts, strconv.FormatUint(uint64(idx), 10))
 		}
 	}
