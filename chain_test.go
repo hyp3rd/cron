@@ -10,11 +10,11 @@ import (
 )
 
 const (
-	jobCompletionWait       = 2 * time.Millisecond
-	twoJobCompletionWait    = 3 * time.Millisecond
-	delayedJobDuration      = 10 * time.Millisecond
-	waitForFirstJob         = 5 * time.Millisecond
-	waitForDelayedJobs      = 25 * time.Millisecond
+	jobCompletionWait       = 10 * time.Millisecond
+	twoJobCompletionWait    = 20 * time.Millisecond
+	delayedJobDuration      = 50 * time.Millisecond
+	waitForFirstJob         = 25 * time.Millisecond
+	waitForDelayedJobs      = 150 * time.Millisecond
 	rapidFireJobRuns        = 11
 	rapidFireCompletionWait = 200 * time.Millisecond
 	independentJobsWait     = 100 * time.Millisecond

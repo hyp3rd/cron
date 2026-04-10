@@ -32,8 +32,9 @@ const (
 )
 
 // baseTime is a fixed instant used by fake-clock tests. It is midnight UTC on
-// a Monday so that day-of-week specs behave predictably.
-var baseTime = time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC) //nolint:gochecknoglobals // test constant
+// a Monday in a neutral month so that January/December-specific specs never
+// fire unexpectedly.
+var baseTime = time.Date(2024, 6, 3, 0, 0, 0, 0, time.UTC) //nolint:gochecknoglobals // test constant
 
 // awaitTimeout is the real-time safety net for tests that advance a fake clock
 // and then wait for a goroutine to observe the result.
@@ -458,7 +459,7 @@ func TestLocalTimezone(t *testing.T) {
 	wg := &sync.WaitGroup{}
 	wg.Add(2)
 
-	// baseTime is 2024-01-01 00:00:00 UTC. Seconds 1 and 2 will fire.
+	// Seconds 1 and 2 relative to baseTime will fire.
 	fc := newFakeClock(baseTime)
 	cron := New(WithParser(testParserWithSeconds()), WithChain(), WithClock(fc), WithLocation(time.UTC))
 
