@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Entry.Name` field with `AddNamedFunc`, `AddNamedJob`, and `ScheduleNamed`
+  methods for human-readable entry labels in logs and hooks.
+- `NextN(Schedule, time.Time, int) []time.Time` function to preview future
+  activation times.
+- `SpecSchedule.String()` method to reconstruct a 6-field cron expression from
+  parsed bit fields.
+- `Timeout(time.Duration)` job wrapper — cancels the job's context after a
+  deadline.
+- `MaxConcurrent(int, *slog.Logger)` job wrapper — allows up to N concurrent
+  invocations, generalizes `SkipIfStillRunning`.
+- `RetryOnError(int, time.Duration)` job wrapper — retries failed jobs with
+  configurable backoff.
+- `EventHooks` struct with `OnJobStart` and `OnJobComplete` callbacks, set via
+  `WithEventHooks` option.
+- `ErrorFunc` type and `WithOnError` option for error-only callbacks.
+- `example_test.go` with runnable examples for pkg.go.dev.
 - `context.Context` threading throughout the public API:
   - `Job.Run(ctx context.Context) error` — jobs receive a cancellable context
     and return errors.

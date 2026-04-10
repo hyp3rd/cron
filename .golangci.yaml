@@ -64,6 +64,14 @@ linters:
   #     - "admin-ui/*"
 
   settings:
+    depguard:
+      rules:
+        main:
+          list-mode: lax
+          allow:
+            - $gostd
+            - github.com/hyp3rd/cron
+
     cyclop:
       # The maximal code complexity to report.
       # Default: 10

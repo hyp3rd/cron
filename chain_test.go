@@ -18,6 +18,13 @@ const (
 	rapidFireJobRuns        = 11
 	rapidFireCompletionWait = 200 * time.Millisecond
 	independentJobsWait     = 100 * time.Millisecond
+	expectedThreeCalls      = 3
+)
+
+var (
+	errTransient  = errors.New("transient")
+	errPersistent = errors.New("persistent")
+	errFail       = errors.New("fail")
 )
 
 func appendingJob(slice *[]int, value int) Job {
@@ -341,5 +348,194 @@ func testChainSkipDifferentJobs(t *testing.T) {
 	done2 := secondJob.Done()
 	if done1 != 1 || done2 != 1 {
 		t.Error("expected both jobs executed once, got", done1, "and", done2)
+	}
+}
+
+func TestMaxConcurrent(t *testing.T) {
+	t.Parallel()
+
+	t.Run("allows up to limit", func(t *testing.T) {
+		t.Parallel()
+
+		var jobCounter countJob
+
+		jobCounter.delay = delayedJobDuration
+
+		wrappedJob := NewChain(MaxConcurrent(2, DiscardLogger())).Then(&jobCounter)
+
+		// Fire 3 concurrently; only 2 should start.
+		for range 3 {
+			runAsync(wrappedJob)
+		}
+
+		time.Sleep(waitForFirstJob)
+
+		started := jobCounter.Started()
+		if started != 2 {
+			t.Errorf("expected 2 started, got %d", started)
+		}
+
+		time.Sleep(waitForDelayedJobs)
+
+		done := jobCounter.Done()
+		if done != 2 {
+			t.Errorf("expected 2 done (1 skipped), got %d", done)
+		}
+	})
+
+	t.Run("limit one behaves like skip", func(t *testing.T) {
+		t.Parallel()
+
+		var jobCounter countJob
+
+		jobCounter.delay = delayedJobDuration
+
+		wrappedJob := NewChain(MaxConcurrent(1, DiscardLogger())).Then(&jobCounter)
+
+		for range 3 {
+			runAsync(wrappedJob)
+		}
+
+		time.Sleep(waitForDelayedJobs)
+
+		done := jobCounter.Done()
+		if done != 1 {
+			t.Errorf("expected 1 done (2 skipped), got %d", done)
+		}
+	})
+}
+
+func TestTimeout(t *testing.T) {
+	t.Parallel()
+
+	t.Run("job completes before timeout", func(t *testing.T) {
+		t.Parallel()
+
+		wrappedJob := NewChain(Timeout(100 * time.Millisecond)).Then(
+			FuncJob(func(_ context.Context) error { return nil }),
+		)
+
+		err := wrappedJob.Run(context.Background())
+		if err != nil {
+			t.Errorf("expected no error, got %v", err)
+		}
+	})
+
+	t.Run("job exceeds timeout", func(t *testing.T) {
+		t.Parallel()
+
+		wrappedJob := NewChain(Timeout(10 * time.Millisecond)).Then(
+			FuncJob(func(ctx context.Context) error {
+				<-ctx.Done()
+
+				return ctx.Err()
+			}),
+		)
+
+		err := wrappedJob.Run(context.Background())
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("expected DeadlineExceeded, got %v", err)
+		}
+	})
+}
+
+func TestRetryOnError(t *testing.T) {
+	t.Parallel()
+
+	t.Run("succeeds on first try", testRetrySucceedsFirstTry)
+	t.Run("succeeds after retries", testRetrySucceedsAfterRetries)
+	t.Run("exhausts retries", testRetryExhaustsRetries)
+	t.Run("respects context cancellation", testRetryRespectsCancel)
+}
+
+func testRetrySucceedsFirstTry(t *testing.T) {
+	t.Parallel()
+
+	var calls int
+
+	wrappedJob := NewChain(RetryOnError(3, 0)).Then(
+		FuncJob(func(_ context.Context) error {
+			calls++
+
+			return nil
+		}),
+	)
+
+	err := wrappedJob.Run(context.Background())
+	if err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+
+	if calls != 1 {
+		t.Errorf("expected 1 call, got %d", calls)
+	}
+}
+
+func testRetrySucceedsAfterRetries(t *testing.T) {
+	t.Parallel()
+
+	var calls int
+
+	wrappedJob := NewChain(RetryOnError(3, 0)).Then(
+		FuncJob(func(_ context.Context) error {
+			calls++
+
+			if calls < 3 {
+				return errTransient
+			}
+
+			return nil
+		}),
+	)
+
+	err := wrappedJob.Run(context.Background())
+	if err != nil {
+		t.Errorf("expected nil after retries, got %v", err)
+	}
+
+	if calls != expectedThreeCalls {
+		t.Errorf("expected 3 calls, got %d", calls)
+	}
+}
+
+func testRetryExhaustsRetries(t *testing.T) {
+	t.Parallel()
+
+	var calls int
+
+	wrappedJob := NewChain(RetryOnError(2, 0)).Then(
+		FuncJob(func(_ context.Context) error {
+			calls++
+
+			return errPersistent
+		}),
+	)
+
+	err := wrappedJob.Run(context.Background())
+	if err == nil {
+		t.Error("expected error after exhausting retries")
+	}
+
+	if calls != expectedThreeCalls {
+		t.Errorf("expected 3 calls (1 + 2 retries), got %d", calls)
+	}
+}
+
+func testRetryRespectsCancel(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	wrappedJob := NewChain(RetryOnError(5, time.Hour)).Then(
+		FuncJob(func(_ context.Context) error {
+			cancel() // cancel during first backoff
+
+			return errFail
+		}),
+	)
+
+	err := wrappedJob.Run(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", err)
 	}
 }

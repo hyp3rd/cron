@@ -61,7 +61,14 @@ func main() {
 - **`Clock` interface** — inject a fake clock via `WithClock` for deterministic,
   zero-`time.Sleep` tests.
 - **Job wrappers** — `Recover`, `SkipIfStillRunning`, `DelayIfStillRunning`,
-  and custom `JobWrapper` chains.
+  `Timeout`, `MaxConcurrent`, `RetryOnError`, and custom `JobWrapper` chains.
+- **Named entries** — `AddNamedFunc` / `AddNamedJob` attach human-readable
+  labels for logging and observability.
+- **Event hooks** — `WithEventHooks` for `OnJobStart` / `OnJobComplete`
+  callbacks; `WithOnError` for error-only alerting.
+- **Schedule inspection** — `NextN` previews future fire times;
+  `SpecSchedule.String()` round-trips a parsed schedule back to a cron
+  expression.
 - **Thread-safe** — add, remove, and inspect entries while the scheduler is
   running.
 
@@ -112,6 +119,61 @@ Or per-job:
 
 ```go
 wrapped := cron.NewChain(cron.Recover(logger)).Then(myJob)
+```
+
+### Timeout, concurrency, and retries
+
+```go
+c := cron.New(cron.WithChain(
+    cron.Timeout(30 * time.Second),          // cancel after 30s
+    cron.MaxConcurrent(3, logger),           // allow up to 3 in parallel
+    cron.RetryOnError(2, 5 * time.Second),   // retry twice with 5s backoff
+    cron.Recover(logger),
+))
+```
+
+## Named entries
+
+```go
+c.AddNamedFunc("daily-report", "0 9 * * *", generateReport)
+
+for _, e := range c.Entries() {
+    fmt.Println(e.ID, e.Name, e.Next)
+}
+```
+
+## Event hooks
+
+```go
+c := cron.New(cron.WithEventHooks(cron.EventHooks{
+    OnJobStart: func(id cron.EntryID, name string) {
+        span := tracer.Start(name)  // start a trace span
+    },
+    OnJobComplete: func(id cron.EntryID, name string, elapsed time.Duration, err error) {
+        metrics.Observe(name, elapsed, err)  // record metrics
+    },
+}))
+```
+
+For error-only callbacks (alerting, retries):
+
+```go
+c := cron.New(cron.WithOnError(func(id cron.EntryID, name string, err error) {
+    alerting.Notify(name, err)
+}))
+```
+
+## Schedule inspection
+
+```go
+// Preview the next 5 fire times
+sched, _ := cron.ParseStandard("0 */6 * * *")
+for _, t := range cron.NextN(sched, time.Now(), 5) {
+    fmt.Println(t)
+}
+
+// Round-trip a parsed schedule back to a string
+fmt.Println(sched) // "0 0,6,12,18 * * * *"
 ```
 
 ## Testing with a fake clock
