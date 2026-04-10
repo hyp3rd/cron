@@ -70,7 +70,7 @@ func ExampleCron_AddNamedFunc() {
 func ExampleNextN() {
 	sched, _ := cron.ParseStandard(exampleEveryHour)
 
-	//nolint:revive // example uses fixed date and count for deterministic output
+	//nolint:revive // example uses fixed date for deterministic output
 	anchor := time.Date(2024, 6, 3, 12, 0, 0, 0, time.UTC)
 	times := cron.NextN(sched, anchor, exampleNextNCount)
 

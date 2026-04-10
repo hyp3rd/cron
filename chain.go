@@ -124,6 +124,8 @@ func SkipIfStillRunning(logger *slog.Logger) JobWrapper {
 // It generalizes [SkipIfStillRunning], which is equivalent to MaxConcurrent
 // with a limit of 1.
 func MaxConcurrent(limit int, logger *slog.Logger) JobWrapper {
+	limit = max(limit, 1)
+
 	return func(job Job) Job {
 		sem := make(chan struct{}, limit)
 
@@ -170,6 +172,8 @@ func Timeout(duration time.Duration) JobWrapper {
 //
 // The backoff uses real wall-clock time, not the scheduler's [Clock] interface.
 func RetryOnError(maxRetries int, backoff time.Duration) JobWrapper {
+	maxRetries = max(maxRetries, 0)
+
 	return func(job Job) Job {
 		return FuncJob(func(ctx context.Context) error {
 			return executeWithRetry(ctx, job, maxRetries, backoff)

@@ -528,29 +528,51 @@ func (c *Cron) handleEntryRemoved(id EntryID) time.Time {
 
 // startJob runs the entry's wrapped job in a new goroutine, firing any
 // configured [EventHooks] and [ErrorFunc]. Non-nil errors are logged at Warn
-// level and do not affect future executions.
+// level and do not affect future executions. Hook panics are recovered and
+// logged so that observability callbacks cannot crash the scheduler.
 func (c *Cron) startJob(ctx context.Context, entry *Entry) {
 	c.jobWaiter.Go(func() {
+		c.executeJob(ctx, entry)
+	})
+}
+
+func (c *Cron) executeJob(ctx context.Context, entry *Entry) {
+	c.safeCallHook(func() {
 		if c.hooks.OnJobStart != nil {
 			c.hooks.OnJobStart(entry.ID, entry.Name)
 		}
+	})
 
-		start := time.Now()
+	start := time.Now()
 
-		err := entry.wrappedJob.Run(ctx)
+	err := entry.wrappedJob.Run(ctx)
 
+	c.safeCallHook(func() {
 		if c.hooks.OnJobComplete != nil {
 			c.hooks.OnJobComplete(entry.ID, entry.Name, time.Since(start), err)
 		}
+	})
 
-		if err != nil {
-			c.logger.Warn("job error", "err", err, "entry", entry.ID, "name", entry.Name)
+	if err != nil {
+		c.logger.Warn("job error", "err", err, "entry", entry.ID, "name", entry.Name)
 
+		c.safeCallHook(func() {
 			if c.onError != nil {
 				c.onError(entry.ID, entry.Name, err)
 			}
+		})
+	}
+}
+
+// safeCallHook calls fn and recovers from any panic, logging it as an error.
+func (c *Cron) safeCallHook(fn func()) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			c.logger.Error("hook panic", "recovered", recovered)
 		}
-	})
+	}()
+
+	fn()
 }
 
 // now returns current time in c location.
