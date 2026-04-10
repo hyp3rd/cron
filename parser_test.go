@@ -7,9 +7,40 @@ import (
 	"time"
 )
 
-var secondParser = NewParser(Second | Minute | Hour | Dom | Month | DowOptional | Descriptor)
+const (
+	minValueZero  uint = 0
+	minValueOne   uint = 1
+	maxValueThree uint = 3
+	maxValueFour  uint = 4
+	valueFive     uint = 5
+	valueSix      uint = 6
+	maxValueSeven uint = 7
+
+	fieldValueZero     = "0"
+	fieldValueFive     = "5"
+	fieldValueFifteen  = "15"
+	fieldValueWildcard = "*"
+
+	fiveMinuteDelay = 5 * time.Minute
+
+	failedToParseIntText = "failed to parse int from"
+	unexpectedErrorText  = "%s => unexpected error %v"
+
+	bitMaskZeroToFiftyNine  uint64 = 0xfffffffffffffff
+	bitMaskZeroToTwentyFour uint64 = 0xffffff
+	bitMaskOneToThirtyOne   uint64 = 0xfffffffe
+	bitMaskOneToTwelve      uint64 = 0x1ffe
+	bitMaskZeroToSix        uint64 = 0x7f
+
+	singleBitZero         uint64 = 0x1
+	singleBitOne          uint64 = 0x2
+	alternatingBitsToFive uint64 = 0x2a
+	alternatingBitsToFour uint64 = 0xa
+)
 
 func TestRange(t *testing.T) {
+	t.Parallel()
+
 	zero := uint64(0)
 	ranges := []struct {
 		expr     string
@@ -17,120 +48,143 @@ func TestRange(t *testing.T) {
 		expected uint64
 		err      string
 	}{
-		{"5", 0, 7, 1 << 5, ""},
-		{"0", 0, 7, 1 << 0, ""},
-		{"7", 0, 7, 1 << 7, ""},
+		{fieldValueFive, minValueZero, maxValueSeven, 1 << valueFive, ""},
+		{fieldValueZero, minValueZero, maxValueSeven, 1 << minValueZero, ""},
+		{"7", minValueZero, maxValueSeven, 1 << maxValueSeven, ""},
 
-		{"5-5", 0, 7, 1 << 5, ""},
-		{"5-6", 0, 7, 1<<5 | 1<<6, ""},
-		{"5-7", 0, 7, 1<<5 | 1<<6 | 1<<7, ""},
+		{"5-5", minValueZero, maxValueSeven, 1 << valueFive, ""},
+		{"5-6", minValueZero, maxValueSeven, 1<<valueFive | 1<<valueSix, ""},
+		{"5-7", minValueZero, maxValueSeven, 1<<valueFive | 1<<valueSix | 1<<maxValueSeven, ""},
 
-		{"5-6/2", 0, 7, 1 << 5, ""},
-		{"5-7/2", 0, 7, 1<<5 | 1<<7, ""},
-		{"5-7/1", 0, 7, 1<<5 | 1<<6 | 1<<7, ""},
+		{"5-6/2", minValueZero, maxValueSeven, 1 << valueFive, ""},
+		{"5-7/2", minValueZero, maxValueSeven, 1<<valueFive | 1<<maxValueSeven, ""},
+		{"5-7/1", minValueZero, maxValueSeven, 1<<valueFive | 1<<valueSix | 1<<maxValueSeven, ""},
 
-		{"*", 1, 3, 1<<1 | 1<<2 | 1<<3 | starBit, ""},
-		{"*/2", 1, 3, 1<<1 | 1<<3, ""},
+		{fieldValueWildcard, minValueOne, maxValueThree, 1<<minValueOne | 1<<2 | 1<<maxValueThree | starBit, ""},
+		{"*/2", minValueOne, maxValueThree, 1<<minValueOne | 1<<maxValueThree, ""},
 
-		{"5--5", 0, 0, zero, "too many hyphens"},
-		{"jan-x", 0, 0, zero, "failed to parse int from"},
-		{"2-x", 1, 5, zero, "failed to parse int from"},
-		{"*/-12", 0, 0, zero, "negative number"},
-		{"*//2", 0, 0, zero, "too many slashes"},
-		{"1", 3, 5, zero, "below minimum"},
-		{"6", 3, 5, zero, "above maximum"},
-		{"5-3", 3, 5, zero, "beyond end of range"},
-		{"*/0", 0, 0, zero, "should be a positive number"},
+		{"5--5", minValueZero, minValueZero, zero, "too many hyphens"},
+		{"jan-x", minValueZero, minValueZero, zero, failedToParseIntText},
+		{"2-x", minValueOne, valueFive, zero, failedToParseIntText},
+		{"*/-12", minValueZero, minValueZero, zero, "negative number"},
+		{"*//2", minValueZero, minValueZero, zero, "too many slashes"},
+		{"1", maxValueThree, valueFive, zero, "below minimum"},
+		{"6", maxValueThree, valueFive, zero, "above maximum"},
+		{"5-3", maxValueThree, valueFive, zero, "beyond end of range"},
+		{"*/0", minValueZero, minValueZero, zero, "should be a positive number"},
 	}
 
-	for _, c := range ranges {
-		actual, err := getRange(c.expr, bounds{c.min, c.max, nil})
-		if len(c.err) != 0 && (err == nil || !strings.Contains(err.Error(), c.err)) {
-			t.Errorf("%s => expected %v, got %v", c.expr, c.err, err)
+	for _, testCase := range ranges {
+		actual, err := getRange(testCase.expr, bounds{testCase.min, testCase.max, nil})
+		if len(testCase.err) != 0 && (err == nil || !strings.Contains(err.Error(), testCase.err)) {
+			t.Errorf("%s => expected %v, got %v", testCase.expr, testCase.err, err)
 		}
-		if len(c.err) == 0 && err != nil {
-			t.Errorf("%s => unexpected error %v", c.expr, err)
+
+		if len(testCase.err) == 0 && err != nil {
+			t.Errorf(unexpectedErrorText, testCase.expr, err)
 		}
-		if actual != c.expected {
-			t.Errorf("%s => expected %d, got %d", c.expr, c.expected, actual)
+
+		if actual != testCase.expected {
+			t.Errorf("%s => expected %d, got %d", testCase.expr, testCase.expected, actual)
 		}
 	}
 }
 
 func TestField(t *testing.T) {
+	t.Parallel()
+
 	fields := []struct {
 		expr     string
 		min, max uint
 		expected uint64
 	}{
-		{"5", 1, 7, 1 << 5},
-		{"5,6", 1, 7, 1<<5 | 1<<6},
-		{"5,6,7", 1, 7, 1<<5 | 1<<6 | 1<<7},
-		{"1,5-7/2,3", 1, 7, 1<<1 | 1<<5 | 1<<7 | 1<<3},
+		{fieldValueFive, minValueOne, maxValueSeven, 1 << valueFive},
+		{"5,6", minValueOne, maxValueSeven, 1<<valueFive | 1<<valueSix},
+		{"5,6,7", minValueOne, maxValueSeven, 1<<valueFive | 1<<valueSix | 1<<maxValueSeven},
+		{"1,5-7/2,3", minValueOne, maxValueSeven, 1<<minValueOne | 1<<valueFive | 1<<maxValueSeven | 1<<maxValueThree},
 	}
 
-	for _, c := range fields {
-		actual, _ := getField(c.expr, bounds{c.min, c.max, nil})
-		if actual != c.expected {
-			t.Errorf("%s => expected %d, got %d", c.expr, c.expected, actual)
+	for _, testCase := range fields {
+		actual, err := getField(testCase.expr, bounds{testCase.min, testCase.max, nil})
+		if err != nil {
+			t.Errorf(unexpectedErrorText, testCase.expr, err)
+		}
+
+		if actual != testCase.expected {
+			t.Errorf("%s => expected %d, got %d", testCase.expr, testCase.expected, actual)
 		}
 	}
 }
 
 func TestAll(t *testing.T) {
+	t.Parallel()
+
+	minuteRange := minuteBounds()
+	hourRange := hourBounds()
+	domRange := dayOfMonthBounds()
+	monthRange := monthBounds()
+	dowRange := dayOfWeekBounds()
+
 	allBits := []struct {
 		r        bounds
 		expected uint64
 	}{
-		{minutes, 0xfffffffffffffff}, // 0-59: 60 ones
-		{hours, 0xffffff},            // 0-23: 24 ones
-		{dom, 0xfffffffe},            // 1-31: 31 ones, 1 zero
-		{months, 0x1ffe},             // 1-12: 12 ones, 1 zero
-		{dow, 0x7f},                  // 0-6: 7 ones
+		{minuteRange, bitMaskZeroToFiftyNine},
+		{hourRange, bitMaskZeroToTwentyFour},
+		{domRange, bitMaskOneToThirtyOne},
+		{monthRange, bitMaskOneToTwelve},
+		{dowRange, bitMaskZeroToSix},
 	}
 
-	for _, c := range allBits {
-		actual := all(c.r) // all() adds the starBit, so compensate for that..
-		if c.expected|starBit != actual {
+	for _, testCase := range allBits {
+		actual := all(testCase.r)
+		if testCase.expected|starBit != actual {
 			t.Errorf("%d-%d/%d => expected %b, got %b",
-				c.r.min, c.r.max, 1, c.expected|starBit, actual)
+				testCase.r.min, testCase.r.max, 1, testCase.expected|starBit, actual)
 		}
 	}
 }
 
 func TestBits(t *testing.T) {
+	t.Parallel()
+
 	bits := []struct {
 		min, max, step uint
 		expected       uint64
 	}{
-		{0, 0, 1, 0x1},
-		{1, 1, 1, 0x2},
-		{1, 5, 2, 0x2a}, // 101010
-		{1, 4, 2, 0xa},  // 1010
+		{minValueZero, minValueZero, minValueOne, singleBitZero},
+		{minValueOne, minValueOne, minValueOne, singleBitOne},
+		{minValueOne, valueFive, 2, alternatingBitsToFive},
+		{minValueOne, maxValueFour, 2, alternatingBitsToFour},
 	}
 
-	for _, c := range bits {
-		actual := getBits(c.min, c.max, c.step)
-		if c.expected != actual {
+	for _, testCase := range bits {
+		actual := getBits(testCase.min, testCase.max, testCase.step)
+		if testCase.expected != actual {
 			t.Errorf("%d-%d/%d => expected %b, got %b",
-				c.min, c.max, c.step, c.expected, actual)
+				testCase.min, testCase.max, testCase.step, testCase.expected, actual)
 		}
 	}
 }
 
 func TestParseScheduleErrors(t *testing.T) {
-	var tests = []struct{ expr, err string }{
-		{"* 5 j * * *", "failed to parse int from"},
+	t.Parallel()
+
+	tests := []struct{ expr, err string }{
+		{"* 5 j * * *", failedToParseIntText},
 		{"@every Xm", "failed to parse duration"},
 		{"@unrecognized", "unrecognized descriptor"},
 		{"* * * *", "expected 5 to 6 fields"},
 		{"", "empty spec string"},
 	}
-	for _, c := range tests {
-		actual, err := secondParser.Parse(c.expr)
-		if err == nil || !strings.Contains(err.Error(), c.err) {
-			t.Errorf("%s => expected %v, got %v", c.expr, c.err, err)
+	parserWithSeconds := testParserWithSeconds()
+
+	for _, testCase := range tests {
+		actual, err := parserWithSeconds.Parse(testCase.expr)
+		if err == nil || !strings.Contains(err.Error(), testCase.err) {
+			t.Errorf("%s => expected %v, got %v", testCase.expr, testCase.err, err)
 		}
+
 		if actual != nil {
 			t.Errorf("expected nil schedule on error, got %v", actual)
 		}
@@ -138,51 +192,58 @@ func TestParseScheduleErrors(t *testing.T) {
 }
 
 func TestParseSchedule(t *testing.T) {
-	tokyo, _ := time.LoadLocation("Asia/Tokyo")
+	t.Parallel()
+
+	tokyo := mustLoadLocation(t, "Asia/Tokyo")
+	parserWithSeconds := testParserWithSeconds()
+
 	entries := []struct {
 		parser   Parser
 		expr     string
 		expected Schedule
 	}{
-		{secondParser, "0 5 * * * *", every5min(time.Local)},
-		{standardParser, "5 * * * *", every5min(time.Local)},
-		{secondParser, "CRON_TZ=UTC  0 5 * * * *", every5min(time.UTC)},
-		{standardParser, "CRON_TZ=UTC  5 * * * *", every5min(time.UTC)},
-		{secondParser, "CRON_TZ=Asia/Tokyo 0 5 * * * *", every5min(tokyo)},
-		{secondParser, "@every 5m", ConstantDelaySchedule{5 * time.Minute}},
-		{secondParser, "@midnight", midnight(time.Local)},
-		{secondParser, "TZ=UTC  @midnight", midnight(time.UTC)},
-		{secondParser, "TZ=Asia/Tokyo @midnight", midnight(tokyo)},
-		{secondParser, "@yearly", annual(time.Local)},
-		{secondParser, "@annually", annual(time.Local)},
+		{parserWithSeconds, "0 5 * * * *", every5min(time.Local)},
+		{NewStandardParser(), "5 * * * *", every5min(time.Local)},
+		{parserWithSeconds, "CRON_TZ=UTC  0 5 * * * *", every5min(time.UTC)},
+		{NewStandardParser(), "CRON_TZ=UTC  5 * * * *", every5min(time.UTC)},
+		{parserWithSeconds, "CRON_TZ=Asia/Tokyo 0 5 * * * *", every5min(tokyo)},
+		{parserWithSeconds, "@every 5m", ConstantDelaySchedule{fiveMinuteDelay}},
+		{parserWithSeconds, "@midnight", midnight(time.Local)},
+		{parserWithSeconds, "TZ=UTC  @midnight", midnight(time.UTC)},
+		{parserWithSeconds, "TZ=Asia/Tokyo @midnight", midnight(tokyo)},
+		{parserWithSeconds, "@yearly", annual(time.Local)},
+		{parserWithSeconds, "@annually", annual(time.Local)},
 		{
-			parser: secondParser,
+			parser: parserWithSeconds,
 			expr:   "* 5 * * * *",
 			expected: &SpecSchedule{
-				Second:   all(seconds),
-				Minute:   1 << 5,
-				Hour:     all(hours),
-				Dom:      all(dom),
-				Month:    all(months),
-				Dow:      all(dow),
+				Second:   all(secondBounds()),
+				Minute:   1 << valueFive,
+				Hour:     all(hourBounds()),
+				Dom:      all(dayOfMonthBounds()),
+				Month:    all(monthBounds()),
+				Dow:      all(dayOfWeekBounds()),
 				Location: time.Local,
 			},
 		},
 	}
 
-	for _, c := range entries {
-		actual, err := c.parser.Parse(c.expr)
+	for _, testCase := range entries {
+		actual, err := testCase.parser.Parse(testCase.expr)
 		if err != nil {
-			t.Errorf("%s => unexpected error %v", c.expr, err)
+			t.Errorf(unexpectedErrorText, testCase.expr, err)
 		}
-		if !reflect.DeepEqual(actual, c.expected) {
-			t.Errorf("%s => expected %b, got %b", c.expr, c.expected, actual)
+
+		if !reflect.DeepEqual(actual, testCase.expected) {
+			t.Errorf("%s => expected %b, got %b", testCase.expr, testCase.expected, actual)
 		}
 	}
 }
 
 func TestOptionalSecondSchedule(t *testing.T) {
-	parser := NewParser(SecondOptional | Minute | Hour | Dom | Month | Dow | Descriptor)
+	t.Parallel()
+
+	parser := NewSpecParser(SecondOptional | Minute | Hour | Dom | Month | Dow | Descriptor)
 	entries := []struct {
 		expr     string
 		expected Schedule
@@ -192,18 +253,21 @@ func TestOptionalSecondSchedule(t *testing.T) {
 		{"5 * * * *", every5min(time.Local)},
 	}
 
-	for _, c := range entries {
-		actual, err := parser.Parse(c.expr)
+	for _, testCase := range entries {
+		actual, err := parser.Parse(testCase.expr)
 		if err != nil {
-			t.Errorf("%s => unexpected error %v", c.expr, err)
+			t.Errorf(unexpectedErrorText, testCase.expr, err)
 		}
-		if !reflect.DeepEqual(actual, c.expected) {
-			t.Errorf("%s => expected %b, got %b", c.expr, c.expected, actual)
+
+		if !reflect.DeepEqual(actual, testCase.expected) {
+			t.Errorf("%s => expected %b, got %b", testCase.expr, testCase.expected, actual)
 		}
 	}
 }
 
 func TestNormalizeFields(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		input    []string
@@ -212,62 +276,67 @@ func TestNormalizeFields(t *testing.T) {
 	}{
 		{
 			"AllFields_NoOptional",
-			[]string{"0", "5", "*", "*", "*", "*"},
+			[]string{fieldValueZero, fieldValueFive, fieldValueWildcard, fieldValueWildcard, fieldValueWildcard, fieldValueWildcard},
 			Second | Minute | Hour | Dom | Month | Dow | Descriptor,
-			[]string{"0", "5", "*", "*", "*", "*"},
+			[]string{fieldValueZero, fieldValueFive, fieldValueWildcard, fieldValueWildcard, fieldValueWildcard, fieldValueWildcard},
 		},
 		{
 			"AllFields_SecondOptional_Provided",
-			[]string{"0", "5", "*", "*", "*", "*"},
+			[]string{fieldValueZero, fieldValueFive, fieldValueWildcard, fieldValueWildcard, fieldValueWildcard, fieldValueWildcard},
 			SecondOptional | Minute | Hour | Dom | Month | Dow | Descriptor,
-			[]string{"0", "5", "*", "*", "*", "*"},
+			[]string{fieldValueZero, fieldValueFive, fieldValueWildcard, fieldValueWildcard, fieldValueWildcard, fieldValueWildcard},
 		},
 		{
 			"AllFields_SecondOptional_NotProvided",
-			[]string{"5", "*", "*", "*", "*"},
+			[]string{fieldValueFive, fieldValueWildcard, fieldValueWildcard, fieldValueWildcard, fieldValueWildcard},
 			SecondOptional | Minute | Hour | Dom | Month | Dow | Descriptor,
-			[]string{"0", "5", "*", "*", "*", "*"},
+			[]string{fieldValueZero, fieldValueFive, fieldValueWildcard, fieldValueWildcard, fieldValueWildcard, fieldValueWildcard},
 		},
 		{
 			"SubsetFields_NoOptional",
-			[]string{"5", "15", "*"},
+			[]string{fieldValueFive, fieldValueFifteen, fieldValueWildcard},
 			Hour | Dom | Month,
-			[]string{"0", "0", "5", "15", "*", "*"},
+			[]string{fieldValueZero, fieldValueZero, fieldValueFive, fieldValueFifteen, fieldValueWildcard, fieldValueWildcard},
 		},
 		{
 			"SubsetFields_DowOptional_Provided",
-			[]string{"5", "15", "*", "4"},
+			[]string{fieldValueFive, fieldValueFifteen, fieldValueWildcard, "4"},
 			Hour | Dom | Month | DowOptional,
-			[]string{"0", "0", "5", "15", "*", "4"},
+			[]string{fieldValueZero, fieldValueZero, fieldValueFive, fieldValueFifteen, fieldValueWildcard, "4"},
 		},
 		{
 			"SubsetFields_DowOptional_NotProvided",
-			[]string{"5", "15", "*"},
+			[]string{fieldValueFive, fieldValueFifteen, fieldValueWildcard},
 			Hour | Dom | Month | DowOptional,
-			[]string{"0", "0", "5", "15", "*", "*"},
+			[]string{fieldValueZero, fieldValueZero, fieldValueFive, fieldValueFifteen, fieldValueWildcard, fieldValueWildcard},
 		},
 		{
 			"SubsetFields_SecondOptional_NotProvided",
-			[]string{"5", "15", "*"},
+			[]string{fieldValueFive, fieldValueFifteen, fieldValueWildcard},
 			SecondOptional | Hour | Dom | Month,
-			[]string{"0", "0", "5", "15", "*", "*"},
+			[]string{fieldValueZero, fieldValueZero, fieldValueFive, fieldValueFifteen, fieldValueWildcard, fieldValueWildcard},
 		},
 	}
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			actual, err := normalizeFields(test.input, test.options)
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual, err := normalizeFields(testCase.input, testCase.options)
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}
-			if !reflect.DeepEqual(actual, test.expected) {
-				t.Errorf("expected %v, got %v", test.expected, actual)
+
+			if !reflect.DeepEqual(actual, testCase.expected) {
+				t.Errorf("expected %v, got %v", testCase.expected, actual)
 			}
 		})
 	}
 }
 
 func TestNormalizeFields_Errors(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		input   []string
@@ -276,7 +345,7 @@ func TestNormalizeFields_Errors(t *testing.T) {
 	}{
 		{
 			"TwoOptionals",
-			[]string{"0", "5", "*", "*", "*", "*"},
+			[]string{fieldValueZero, fieldValueFive, fieldValueWildcard, fieldValueWildcard, fieldValueWildcard, fieldValueWildcard},
 			SecondOptional | Minute | Hour | Dom | Month | DowOptional,
 			"",
 		},
@@ -299,36 +368,49 @@ func TestNormalizeFields_Errors(t *testing.T) {
 			"",
 		},
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			actual, err := normalizeFields(test.input, test.options)
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual, err := normalizeFields(testCase.input, testCase.options)
 			if err == nil {
 				t.Errorf("expected an error, got none. results: %v", actual)
 			}
-			if !strings.Contains(err.Error(), test.err) {
-				t.Errorf("expected error %q, got %q", test.err, err.Error())
+
+			if !strings.Contains(err.Error(), testCase.err) {
+				t.Errorf("expected error %q, got %q", testCase.err, err.Error())
 			}
 		})
 	}
 }
 
 func TestStandardSpecSchedule(t *testing.T) {
+	t.Parallel()
+
 	entries := []struct {
 		expr     string
 		expected Schedule
 		err      string
 	}{
 		{
-			expr:     "5 * * * *",
-			expected: &SpecSchedule{1 << seconds.min, 1 << 5, all(hours), all(dom), all(months), all(dow), time.Local},
+			expr: "5 * * * *",
+			expected: &SpecSchedule{
+				1 << secondBounds().min,
+				1 << valueFive,
+				all(hourBounds()),
+				all(dayOfMonthBounds()),
+				all(monthBounds()),
+				all(dayOfWeekBounds()),
+				time.Local,
+			},
 		},
 		{
 			expr:     "@every 5m",
-			expected: ConstantDelaySchedule{time.Duration(5) * time.Minute},
+			expected: ConstantDelaySchedule{fiveMinuteDelay},
 		},
 		{
 			expr: "5 j * * *",
-			err:  "failed to parse int from",
+			err:  failedToParseIntText,
 		},
 		{
 			expr: "* * * *",
@@ -336,22 +418,27 @@ func TestStandardSpecSchedule(t *testing.T) {
 		},
 	}
 
-	for _, c := range entries {
-		actual, err := ParseStandard(c.expr)
-		if len(c.err) != 0 && (err == nil || !strings.Contains(err.Error(), c.err)) {
-			t.Errorf("%s => expected %v, got %v", c.expr, c.err, err)
+	for _, testCase := range entries {
+		actual, err := ParseStandard(testCase.expr)
+		if len(testCase.err) != 0 && (err == nil || !strings.Contains(err.Error(), testCase.err)) {
+			t.Errorf("%s => expected %v, got %v", testCase.expr, testCase.err, err)
 		}
-		if len(c.err) == 0 && err != nil {
-			t.Errorf("%s => unexpected error %v", c.expr, err)
+
+		if len(testCase.err) == 0 && err != nil {
+			t.Errorf(unexpectedErrorText, testCase.expr, err)
 		}
-		if !reflect.DeepEqual(actual, c.expected) {
-			t.Errorf("%s => expected %b, got %b", c.expr, c.expected, actual)
+
+		if !reflect.DeepEqual(actual, testCase.expected) {
+			t.Errorf("%s => expected %b, got %b", testCase.expr, testCase.expected, actual)
 		}
 	}
 }
 
 func TestNoDescriptorParser(t *testing.T) {
-	parser := NewParser(Minute | Hour)
+	t.Parallel()
+
+	parser := NewSpecParser(Minute | Hour)
+
 	_, err := parser.Parse("@every 1m")
 	if err == nil {
 		t.Error("expected an error, got none")
@@ -359,25 +446,41 @@ func TestNoDescriptorParser(t *testing.T) {
 }
 
 func every5min(loc *time.Location) *SpecSchedule {
-	return &SpecSchedule{1 << 0, 1 << 5, all(hours), all(dom), all(months), all(dow), loc}
+	return &SpecSchedule{
+		1 << secondBounds().min,
+		1 << valueFive,
+		all(hourBounds()),
+		all(dayOfMonthBounds()),
+		all(monthBounds()),
+		all(dayOfWeekBounds()),
+		loc,
+	}
 }
 
 func every5min5s(loc *time.Location) *SpecSchedule {
-	return &SpecSchedule{1 << 5, 1 << 5, all(hours), all(dom), all(months), all(dow), loc}
+	return &SpecSchedule{
+		1 << valueFive,
+		1 << valueFive,
+		all(hourBounds()),
+		all(dayOfMonthBounds()),
+		all(monthBounds()),
+		all(dayOfWeekBounds()),
+		loc,
+	}
 }
 
 func midnight(loc *time.Location) *SpecSchedule {
-	return &SpecSchedule{1, 1, 1, all(dom), all(months), all(dow), loc}
+	return &SpecSchedule{1, 1, 1, all(dayOfMonthBounds()), all(monthBounds()), all(dayOfWeekBounds()), loc}
 }
 
 func annual(loc *time.Location) *SpecSchedule {
 	return &SpecSchedule{
-		Second:   1 << seconds.min,
-		Minute:   1 << minutes.min,
-		Hour:     1 << hours.min,
-		Dom:      1 << dom.min,
-		Month:    1 << months.min,
-		Dow:      all(dow),
+		Second:   1 << secondBounds().min,
+		Minute:   1 << minuteBounds().min,
+		Hour:     1 << hourBounds().min,
+		Dom:      1 << dayOfMonthBounds().min,
+		Month:    1 << monthBounds().min,
+		Dow:      all(dayOfWeekBounds()),
 		Location: loc,
 	}
 }

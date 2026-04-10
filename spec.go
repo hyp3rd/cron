@@ -17,172 +17,341 @@ type bounds struct {
 	names    map[string]uint
 }
 
-// The bounds for each field.
-var (
-	seconds = bounds{0, 59, nil}
-	minutes = bounds{0, 59, nil}
-	hours   = bounds{0, 23, nil}
-	dom     = bounds{1, 31, nil}
-	months  = bounds{1, 12, map[string]uint{
-		"jan": 1,
-		"feb": 2,
-		"mar": 3,
-		"apr": 4,
-		"may": 5,
-		"jun": 6,
-		"jul": 7,
-		"aug": 8,
-		"sep": 9,
-		"oct": 10,
-		"nov": 11,
-		"dec": 12,
-	}}
-	dow = bounds{0, 6, map[string]uint{
-		"sun": 0,
-		"mon": 1,
-		"tue": 2,
-		"wed": 3,
-		"thu": 4,
-		"fri": 5,
-		"sat": 6,
-	}}
-)
-
 const (
 	// Set the top bit if a star was included in the expression.
 	starBit = 1 << 63
+
+	middayHour     = 12
+	hoursPerDay    = 24
+	yearSearchSpan = 5
+
+	minSecondValue     uint = 0
+	maxSecondValue     uint = 59
+	minMinuteValue     uint = 0
+	maxMinuteValue     uint = 59
+	minHourValue       uint = 0
+	maxHourValue       uint = 23
+	minDayOfMonthValue uint = 1
+	maxDayOfMonthValue uint = 31
+	minMonthValue      uint = 1
+	maxMonthValue      uint = 12
+	minDayOfWeekValue  uint = 0
+	maxDayOfWeekValue  uint = 6
+
+	monthJanuaryValue   uint = 1
+	monthFebruaryValue  uint = 2
+	monthMarchValue     uint = 3
+	monthAprilValue     uint = 4
+	monthMayValue       uint = 5
+	monthJuneValue      uint = 6
+	monthJulyValue      uint = 7
+	monthAugustValue    uint = 8
+	monthSeptemberValue uint = 9
+	monthOctoberValue   uint = 10
+	monthNovemberValue  uint = 11
+	monthDecemberValue  uint = 12
+
+	weekdaySundayValue    uint = 0
+	weekdayMondayValue    uint = 1
+	weekdayTuesdayValue   uint = 2
+	weekdayWednesdayValue uint = 3
+	weekdayThursdayValue  uint = 4
+	weekdayFridayValue    uint = 5
+	weekdaySaturdayValue  uint = 6
 )
 
+func secondBounds() bounds {
+	return bounds{minSecondValue, maxSecondValue, nil}
+}
+
+func minuteBounds() bounds {
+	return bounds{minMinuteValue, maxMinuteValue, nil}
+}
+
+func hourBounds() bounds {
+	return bounds{minHourValue, maxHourValue, nil}
+}
+
+func dayOfMonthBounds() bounds {
+	return bounds{minDayOfMonthValue, maxDayOfMonthValue, nil}
+}
+
+func monthBounds() bounds {
+	return bounds{minMonthValue, maxMonthValue, map[string]uint{
+		"jan": monthJanuaryValue,
+		"feb": monthFebruaryValue,
+		"mar": monthMarchValue,
+		"apr": monthAprilValue,
+		"may": monthMayValue,
+		"jun": monthJuneValue,
+		"jul": monthJulyValue,
+		"aug": monthAugustValue,
+		"sep": monthSeptemberValue,
+		"oct": monthOctoberValue,
+		"nov": monthNovemberValue,
+		"dec": monthDecemberValue,
+	}}
+}
+
+func dayOfWeekBounds() bounds {
+	return bounds{minDayOfWeekValue, maxDayOfWeekValue, map[string]uint{
+		"sun": weekdaySundayValue,
+		"mon": weekdayMondayValue,
+		"tue": weekdayTuesdayValue,
+		"wed": weekdayWednesdayValue,
+		"thu": weekdayThursdayValue,
+		"fri": weekdayFridayValue,
+		"sat": weekdaySaturdayValue,
+	}}
+}
+
 // Next returns the next time this schedule is activated, greater than the given
-// time.  If no time can be found to satisfy the schedule, return the zero time.
-func (s *SpecSchedule) Next(t time.Time) time.Time {
-	// General approach
-	//
-	// For Month, Day, Hour, Minute, Second:
-	// Check if the time value matches.  If yes, continue to the next field.
-	// If the field doesn't match the schedule, then increment the field until it matches.
-	// While incrementing the field, a wrap-around brings it back to the beginning
-	// of the field list (since it is necessary to re-verify previous field
-	// values)
+// time. If no time can be found to satisfy the schedule, return the zero time.
+func (s *SpecSchedule) Next(candidate time.Time) time.Time {
+	origLocation := candidate.Location()
 
-	// Convert the given time into the schedule's timezone, if one is specified.
-	// Save the original timezone so we can convert back after we find a time.
-	// Note that schedules without a time zone specified (time.Local) are treated
-	// as local to the time provided.
-	origLocation := t.Location()
-	loc := s.Location
-	if loc == time.Local {
-		loc = t.Location()
-	}
-	if s.Location != time.Local {
-		t = t.In(s.Location)
-	}
-
-	// Start at the earliest possible time (the upcoming second).
-	t = t.Add(1*time.Second - time.Duration(t.Nanosecond())*time.Nanosecond)
-
-	// This flag indicates whether a field has been incremented.
-	added := false
-
-	// If no time is found within five years, return zero.
-	yearLimit := t.Year() + 5
-
-WRAP:
-	if t.Year() > yearLimit {
+	nextActivation, ok := s.nextActivation(candidate)
+	if !ok {
 		return time.Time{}
 	}
 
-	// Find the first applicable month.
-	// If it's this month, then do nothing.
-	for 1<<uint(t.Month())&s.Month == 0 {
-		// If we have to add a month, reset the other parts to 0.
-		if !added {
-			added = true
-			// Otherwise, set the date at the beginning (since the current time is irrelevant).
-			t = time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, loc)
-		}
-		t = t.AddDate(0, 1, 0)
+	return nextActivation.In(origLocation)
+}
 
-		// Wrapped around.
-		if t.Month() == time.January {
-			goto WRAP
+type nextActivationState struct {
+	schedule  *SpecSchedule
+	added     bool
+	location  *time.Location
+	yearLimit int
+}
+
+func (s *SpecSchedule) nextActivation(candidate time.Time) (time.Time, bool) {
+	candidate, location := s.prepareNext(candidate)
+
+	state := nextActivationState{
+		schedule:  s,
+		location:  location,
+		yearLimit: candidate.Year() + yearSearchSpan,
+	}
+
+	return state.find(candidate)
+}
+
+func (state *nextActivationState) find(candidate time.Time) (time.Time, bool) {
+	for candidate.Year() <= state.yearLimit {
+		var wrapped bool
+
+		candidate, wrapped = state.advance(candidate)
+		if !wrapped {
+			return candidate, true
 		}
 	}
 
-	// Now get a day in that month.
-	//
-	// NOTE: This causes issues for daylight savings regimes where midnight does
-	// not exist.  For example: Sao Paulo has DST that transforms midnight on
-	// 11/3 into 1am. Handle that by noticing when the Hour ends up != 0.
-	for !dayMatches(s, t) {
-		if !added {
-			added = true
-			t = time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, loc)
-		}
-		t = t.AddDate(0, 0, 1)
-		// Notice if the hour is no longer midnight due to DST.
-		// Add an hour if it's 23, subtract an hour if it's 1.
-		if t.Hour() != 0 {
-			if t.Hour() > 12 {
-				t = t.Add(time.Duration(24-t.Hour()) * time.Hour)
-			} else {
-				t = t.Add(time.Duration(-t.Hour()) * time.Hour)
-			}
-		}
+	return time.Time{}, false
+}
 
-		if t.Day() == 1 {
-			goto WRAP
+func (state *nextActivationState) advance(candidate time.Time) (time.Time, bool) {
+	steps := [...]func(time.Time) (time.Time, bool){
+		func(candidate time.Time) (time.Time, bool) {
+			return state.schedule.advanceMonth(candidate, &state.added, state.location)
+		},
+		func(candidate time.Time) (time.Time, bool) {
+			return state.schedule.advanceDay(candidate, &state.added, state.location)
+		},
+		func(candidate time.Time) (time.Time, bool) {
+			return state.schedule.advanceHour(candidate, &state.added, state.location)
+		},
+		func(candidate time.Time) (time.Time, bool) {
+			return state.schedule.advanceMinute(candidate, &state.added)
+		},
+		func(candidate time.Time) (time.Time, bool) {
+			return state.schedule.advanceSecond(candidate, &state.added)
+		},
+	}
+
+	for _, step := range steps {
+		var wrapped bool
+
+		candidate, wrapped = step(candidate)
+		if wrapped {
+			return candidate, true
 		}
 	}
 
-	for 1<<uint(t.Hour())&s.Hour == 0 {
-		if !added {
-			added = true
-			t = time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, loc)
-		}
-		t = t.Add(1 * time.Hour)
+	return candidate, false
+}
 
-		if t.Hour() == 0 {
-			goto WRAP
+func (s *SpecSchedule) prepareNext(candidate time.Time) (time.Time, *time.Location) {
+	loc := s.Location
+	if loc == time.Local {
+		loc = candidate.Location()
+	}
+
+	if s.Location != time.Local {
+		candidate = candidate.In(s.Location)
+	}
+
+	return candidate.Add(time.Second - time.Duration(candidate.Nanosecond())*time.Nanosecond), loc
+}
+
+func (s *SpecSchedule) advanceMonth(candidate time.Time, added *bool, loc *time.Location) (time.Time, bool) {
+	for !s.monthMatches(candidate) {
+		candidate = resetMonth(candidate, added, loc)
+		candidate = candidate.AddDate(0, 1, 0)
+
+		if candidate.Month() == time.January {
+			return candidate, true
 		}
 	}
 
-	for 1<<uint(t.Minute())&s.Minute == 0 {
-		if !added {
-			added = true
-			t = t.Truncate(time.Minute)
-		}
-		t = t.Add(1 * time.Minute)
+	return candidate, false
+}
 
-		if t.Minute() == 0 {
-			goto WRAP
-		}
-	}
+func (s *SpecSchedule) advanceDay(candidate time.Time, added *bool, loc *time.Location) (time.Time, bool) {
+	for !dayMatches(s, candidate) {
+		candidate = resetDay(candidate, added, loc)
+		candidate = normalizeMidnight(candidate.AddDate(0, 0, 1))
 
-	for 1<<uint(t.Second())&s.Second == 0 {
-		if !added {
-			added = true
-			t = t.Truncate(time.Second)
-		}
-		t = t.Add(1 * time.Second)
-
-		if t.Second() == 0 {
-			goto WRAP
+		if candidate.Day() == 1 {
+			return candidate, true
 		}
 	}
 
-	return t.In(origLocation)
+	return candidate, false
+}
+
+func (s *SpecSchedule) advanceHour(candidate time.Time, added *bool, loc *time.Location) (time.Time, bool) {
+	for !s.hourMatches(candidate) {
+		candidate = resetHour(candidate, added, loc)
+		candidate = candidate.Add(time.Hour)
+
+		if candidate.Hour() == 0 {
+			return candidate, true
+		}
+	}
+
+	return candidate, false
+}
+
+func (s *SpecSchedule) advanceMinute(candidate time.Time, added *bool) (time.Time, bool) {
+	for !s.minuteMatches(candidate) {
+		candidate = truncateMinute(candidate, added)
+		candidate = candidate.Add(time.Minute)
+
+		if candidate.Minute() == 0 {
+			return candidate, true
+		}
+	}
+
+	return candidate, false
+}
+
+func (s *SpecSchedule) advanceSecond(candidate time.Time, added *bool) (time.Time, bool) {
+	for !s.secondMatches(candidate) {
+		candidate = truncateSecond(candidate, added)
+		candidate = candidate.Add(time.Second)
+
+		if candidate.Second() == 0 {
+			return candidate, true
+		}
+	}
+
+	return candidate, false
+}
+
+func (s *SpecSchedule) monthMatches(candidate time.Time) bool {
+	return hasBit(s.Month, int(candidate.Month()))
+}
+
+func (s *SpecSchedule) hourMatches(candidate time.Time) bool {
+	return hasBit(s.Hour, candidate.Hour())
+}
+
+func (s *SpecSchedule) minuteMatches(candidate time.Time) bool {
+	return hasBit(s.Minute, candidate.Minute())
+}
+
+func (s *SpecSchedule) secondMatches(candidate time.Time) bool {
+	return hasBit(s.Second, candidate.Second())
+}
+
+func resetMonth(candidate time.Time, added *bool, loc *time.Location) time.Time {
+	if *added {
+		return candidate
+	}
+
+	*added = true
+
+	return time.Date(candidate.Year(), candidate.Month(), 1, 0, 0, 0, 0, loc)
+}
+
+func resetDay(candidate time.Time, added *bool, loc *time.Location) time.Time {
+	if *added {
+		return candidate
+	}
+
+	*added = true
+
+	return time.Date(candidate.Year(), candidate.Month(), candidate.Day(), 0, 0, 0, 0, loc)
+}
+
+func resetHour(candidate time.Time, added *bool, loc *time.Location) time.Time {
+	if *added {
+		return candidate
+	}
+
+	*added = true
+
+	return time.Date(candidate.Year(), candidate.Month(), candidate.Day(), candidate.Hour(), 0, 0, 0, loc)
+}
+
+func truncateMinute(candidate time.Time, added *bool) time.Time {
+	if *added {
+		return candidate
+	}
+
+	*added = true
+
+	return candidate.Truncate(time.Minute)
+}
+
+func truncateSecond(candidate time.Time, added *bool) time.Time {
+	if *added {
+		return candidate
+	}
+
+	*added = true
+
+	return candidate.Truncate(time.Second)
+}
+
+// normalizeMidnight handles DST regimes where local midnight does not exist.
+func normalizeMidnight(candidate time.Time) time.Time {
+	if candidate.Hour() == 0 {
+		return candidate
+	}
+
+	if candidate.Hour() > middayHour {
+		return candidate.Add(time.Duration(hoursPerDay-candidate.Hour()) * time.Hour)
+	}
+
+	return candidate.Add(time.Duration(-candidate.Hour()) * time.Hour)
 }
 
 // dayMatches returns true if the schedule's day-of-week and day-of-month
 // restrictions are satisfied by the given time.
-func dayMatches(s *SpecSchedule, t time.Time) bool {
+func dayMatches(s *SpecSchedule, candidate time.Time) bool {
 	var (
-		domMatch bool = 1<<uint(t.Day())&s.Dom > 0
-		dowMatch bool = 1<<uint(t.Weekday())&s.Dow > 0
+		domMatch = hasBit(s.Dom, candidate.Day())
+		dowMatch = hasBit(s.Dow, int(candidate.Weekday()))
 	)
 	if s.Dom&starBit > 0 || s.Dow&starBit > 0 {
 		return domMatch && dowMatch
 	}
+
 	return domMatch || dowMatch
+}
+
+func hasBit(bitset uint64, position int) bool {
+	return uint64(1)<<position&bitset > 0
 }
