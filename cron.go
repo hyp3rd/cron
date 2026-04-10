@@ -35,6 +35,8 @@ type Cron struct {
 	rootCtx    context.Context //nolint:containedctx // stored to propagate cancellation to in-flight jobs
 	rootCancel context.CancelFunc
 	loopDone   chan struct{}
+	onError    ErrorFunc
+	hooks      EventHooks
 }
 
 // Parser turns a cron spec string into a [Schedule]. The default
@@ -67,6 +69,11 @@ type Entry struct {
 	// ID is the cron-assigned ID of this entry, which may be used to look up a
 	// snapshot or remove it.
 	ID EntryID
+
+	// Name is an optional human-readable label for this entry, useful for
+	// logging, metrics, and debugging. It is set via [Cron.AddNamedFunc],
+	// [Cron.AddNamedJob], or [Cron.ScheduleNamed].
+	Name string
 
 	// Schedule on which this job should be run.
 	Schedule Schedule
@@ -149,49 +156,31 @@ func (c *Cron) AddFunc(spec string, cmd func(ctx context.Context) error) (EntryI
 // The spec is parsed using the time zone of this Cron instance as the default.
 // An opaque ID is returned that can be used to later remove it.
 func (c *Cron) AddJob(spec string, cmd Job) (EntryID, error) {
-	schedule, err := c.parser.Parse(spec)
-	if err != nil {
-		return 0, fmt.Errorf("parse schedule %q: %w", spec, err)
-	}
+	return c.parseAndSchedule("", spec, cmd)
+}
 
-	return c.Schedule(schedule, cmd), nil
+// AddNamedFunc is like [Cron.AddFunc] but assigns a human-readable name to the
+// entry. The name appears in log messages, [Entry.Name], and event hooks.
+func (c *Cron) AddNamedFunc(name, spec string, cmd func(ctx context.Context) error) (EntryID, error) {
+	return c.AddNamedJob(name, spec, FuncJob(cmd))
+}
+
+// AddNamedJob is like [Cron.AddJob] but assigns a human-readable name to the
+// entry. The name appears in log messages, [Entry.Name], and event hooks.
+func (c *Cron) AddNamedJob(name, spec string, cmd Job) (EntryID, error) {
+	return c.parseAndSchedule(name, spec, cmd)
 }
 
 // Schedule adds a Job to the Cron to be run on the given schedule.
 // The job is wrapped with the configured Chain.
 func (c *Cron) Schedule(schedule Schedule, cmd Job) EntryID {
-	c.runningMu.Lock()
+	return c.scheduleEntry("", schedule, cmd)
+}
 
-	c.nextID++
-
-	entry := &Entry{
-		ID:         c.nextID,
-		Schedule:   schedule,
-		Job:        cmd,
-		wrappedJob: c.chain.Then(cmd),
-	}
-
-	if !c.running.Load() {
-		c.entries = append(c.entries, entry)
-		c.runningMu.Unlock()
-
-		return entry.ID
-	}
-
-	addCh := c.add
-	loopDone := c.loopDone
-	c.runningMu.Unlock()
-
-	select {
-	case addCh <- entry:
-	case <-loopDone:
-		// Scheduler loop has exited; append directly.
-		c.runningMu.Lock()
-		c.entries = append(c.entries, entry)
-		c.runningMu.Unlock()
-	}
-
-	return entry.ID
+// ScheduleNamed is like [Cron.Schedule] but assigns a human-readable name to
+// the entry. The name appears in log messages, [Entry.Name], and event hooks.
+func (c *Cron) ScheduleNamed(name string, schedule Schedule, cmd Job) EntryID {
+	return c.scheduleEntry(name, schedule, cmd)
 }
 
 // Entries returns a snapshot of the cron entries.
@@ -340,6 +329,51 @@ func (c *Cron) Stop(ctx context.Context) error {
 	}
 }
 
+func (c *Cron) parseAndSchedule(name, spec string, cmd Job) (EntryID, error) {
+	schedule, err := c.parser.Parse(spec)
+	if err != nil {
+		return 0, fmt.Errorf("parse schedule %q: %w", spec, err)
+	}
+
+	return c.scheduleEntry(name, schedule, cmd), nil
+}
+
+func (c *Cron) scheduleEntry(name string, sched Schedule, cmd Job) EntryID {
+	c.runningMu.Lock()
+
+	c.nextID++
+
+	entry := &Entry{
+		ID:         c.nextID,
+		Name:       name,
+		Schedule:   sched,
+		Job:        cmd,
+		wrappedJob: c.chain.Then(cmd),
+	}
+
+	if !c.running.Load() {
+		c.entries = append(c.entries, entry)
+		c.runningMu.Unlock()
+
+		return entry.ID
+	}
+
+	addCh := c.add
+	loopDone := c.loopDone
+	c.runningMu.Unlock()
+
+	select {
+	case addCh <- entry:
+	case <-loopDone:
+		// Scheduler loop has exited; append directly.
+		c.runningMu.Lock()
+		c.entries = append(c.entries, entry)
+		c.runningMu.Unlock()
+	}
+
+	return entry.ID
+}
+
 // enterRunning must be called with runningMu held. It sets up the root context
 // derived from the caller's ctx and marks the scheduler as running.
 func (c *Cron) enterRunning(ctx context.Context) context.Context {
@@ -468,10 +502,10 @@ func (c *Cron) runDueEntries(ctx context.Context, now time.Time) {
 			break
 		}
 
-		c.startJob(ctx, entry.wrappedJob)
+		c.startJob(ctx, entry)
 		entry.Prev = entry.Next
 		entry.Next = entry.Schedule.Next(now)
-		c.logger.Info("run", "now", now, "entry", entry.ID, "next", entry.Next)
+		c.logger.Info("run", "now", now, "entry", entry.ID, "name", entry.Name, "next", entry.Next)
 	}
 }
 
@@ -479,7 +513,7 @@ func (c *Cron) handleEntryAdded(newEntry *Entry) time.Time {
 	now := c.now()
 	newEntry.Next = newEntry.Schedule.Next(now)
 	c.entries = append(c.entries, newEntry)
-	c.logger.Info("added", "now", now, "entry", newEntry.ID, "next", newEntry.Next)
+	c.logger.Info("added", "now", now, "entry", newEntry.ID, "name", newEntry.Name, "next", newEntry.Next)
 
 	return now
 }
@@ -492,15 +526,53 @@ func (c *Cron) handleEntryRemoved(id EntryID) time.Time {
 	return now
 }
 
-// startJob runs the given job in a new goroutine. Non-nil errors returned by
-// the job are logged at Warn level and do not affect future executions.
-func (c *Cron) startJob(ctx context.Context, j Job) {
+// startJob runs the entry's wrapped job in a new goroutine, firing any
+// configured [EventHooks] and [ErrorFunc]. Non-nil errors are logged at Warn
+// level and do not affect future executions. Hook panics are recovered and
+// logged so that observability callbacks cannot crash the scheduler.
+func (c *Cron) startJob(ctx context.Context, entry *Entry) {
 	c.jobWaiter.Go(func() {
-		err := j.Run(ctx)
-		if err != nil {
-			c.logger.Warn("job error", "err", err)
+		c.executeJob(ctx, entry)
+	})
+}
+
+func (c *Cron) executeJob(ctx context.Context, entry *Entry) {
+	c.safeCallHook(func() {
+		if c.hooks.OnJobStart != nil {
+			c.hooks.OnJobStart(entry.ID, entry.Name)
 		}
 	})
+
+	start := time.Now()
+
+	err := entry.wrappedJob.Run(ctx)
+
+	c.safeCallHook(func() {
+		if c.hooks.OnJobComplete != nil {
+			c.hooks.OnJobComplete(entry.ID, entry.Name, time.Since(start), err)
+		}
+	})
+
+	if err != nil {
+		c.logger.Warn("job error", "err", err, "entry", entry.ID, "name", entry.Name)
+
+		c.safeCallHook(func() {
+			if c.onError != nil {
+				c.onError(entry.ID, entry.Name, err)
+			}
+		})
+	}
+}
+
+// safeCallHook calls fn and recovers from any panic, logging it as an error.
+func (c *Cron) safeCallHook(fn func()) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			c.logger.Error("hook panic", "recovered", recovered)
+		}
+	}()
+
+	fn()
 }
 
 // now returns current time in c location.

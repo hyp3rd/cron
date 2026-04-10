@@ -195,6 +195,47 @@ Install wrappers for individual jobs by explicitly wrapping them:
 		cron.SkipIfStillRunning(logger),
 	).Then(job)
 
+Additional built-in wrappers:
+
+  - [Timeout] — cancels the job's context after a deadline
+  - [MaxConcurrent] — allows up to N concurrent invocations (generalizes SkipIfStillRunning)
+  - [RetryOnError] — retries failed jobs with configurable backoff
+
+Wrapper ordering matters when composing. For example:
+
+	cron.NewChain(cron.Timeout(5*time.Second), cron.RetryOnError(3, time.Second)).Then(job)
+
+gives each retry attempt its own 5-second timeout, while reversing the order
+shares a single timeout across all retries.
+
+# Named entries
+
+Use [Cron.AddNamedFunc], [Cron.AddNamedJob], or [Cron.ScheduleNamed] to assign
+a human-readable name to an entry. The name appears in log messages,
+[Entry.Name], and event hook callbacks.
+
+# Event hooks
+
+Register lifecycle callbacks via [WithEventHooks]:
+
+	cron.New(cron.WithEventHooks(cron.EventHooks{
+		OnJobStart:    func(id cron.EntryID, name string) { ... },
+		OnJobComplete: func(id cron.EntryID, name string, elapsed time.Duration, err error) { ... },
+	}))
+
+For error-only callbacks, use [WithOnError]:
+
+	cron.New(cron.WithOnError(func(id cron.EntryID, name string, err error) { ... }))
+
+# Schedule inspection
+
+[NextN] previews the next N fire times for any [Schedule]:
+
+	times := cron.NextN(sched, time.Now(), 5)
+
+[SpecSchedule.String] reconstructs a 6-field cron expression from a parsed
+schedule, enabling serialization and debugging.
+
 # Thread safety
 
 Since the Cron service runs concurrently with the calling code, some amount of

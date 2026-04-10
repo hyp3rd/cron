@@ -953,3 +953,179 @@ func signalJobStarted(started chan<- struct{}) {
 	default:
 	}
 }
+
+func TestEventHooksOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	var (
+		startID   atomic.Int64
+		startName atomic.Value
+		compID    atomic.Int64
+		compName  atomic.Value
+	)
+
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+
+	fc := newFakeClock(baseTime)
+	cron := New(
+		WithParser(testParserWithSeconds()),
+		WithChain(),
+		WithClock(fc),
+		WithEventHooks(EventHooks{
+			OnJobStart: func(id EntryID, name string) {
+				startID.Store(int64(id))
+				startName.Store(name)
+			},
+			OnJobComplete: func(id EntryID, name string, _ time.Duration, _ error) {
+				compID.Store(int64(id))
+				compName.Store(name)
+			},
+		}),
+	)
+
+	mustAddNamedFunc(t, cron, "test-job", everySecondSpec, done(wg))
+
+	startCron(t, cron)
+	fc.BlockUntilTimers(1)
+	fc.Advance(1 * time.Second)
+	awaitWg(t, wg)
+
+	if startID.Load() != 1 {
+		t.Errorf("OnJobStart: expected id=1, got %d", startID.Load())
+	}
+
+	if startName.Load() != "test-job" {
+		t.Errorf("OnJobStart: expected name=test-job, got %v", startName.Load())
+	}
+
+	if compID.Load() != 1 {
+		t.Errorf("OnJobComplete: expected id=1, got %d", compID.Load())
+	}
+
+	if compName.Load() != "test-job" {
+		t.Errorf("OnJobComplete: expected name=test-job, got %v", compName.Load())
+	}
+}
+
+func TestOnErrorCallback(t *testing.T) {
+	t.Parallel()
+
+	var (
+		cbID   atomic.Int64
+		cbName atomic.Value
+		cbErr  atomic.Value
+	)
+
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+
+	fc := newFakeClock(baseTime)
+	cron := New(
+		WithParser(testParserWithSeconds()),
+		WithChain(),
+		WithClock(fc),
+		WithLogger(DiscardLogger()),
+		WithOnError(func(id EntryID, name string, err error) {
+			cbID.Store(int64(id))
+			cbName.Store(name)
+			cbErr.Store(err.Error())
+			wg.Done()
+		}),
+	)
+
+	mustAddNamedFunc(t, cron, "failing", everySecondSpec, func(_ context.Context) error {
+		return errors.New("boom") //nolint:err113 // test error
+	})
+
+	startCron(t, cron)
+	fc.BlockUntilTimers(1)
+	fc.Advance(1 * time.Second)
+	awaitWg(t, wg)
+
+	if cbID.Load() != 1 {
+		t.Errorf("OnError: expected id=1, got %d", cbID.Load())
+	}
+
+	if cbName.Load() != "failing" {
+		t.Errorf("OnError: expected name=failing, got %v", cbName.Load())
+	}
+
+	if cbErr.Load() != "boom" {
+		t.Errorf("OnError: expected err=boom, got %v", cbErr.Load())
+	}
+}
+
+func TestOnErrorNotCalledOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	var errorCalled atomic.Bool
+
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+
+	fc := newFakeClock(baseTime)
+	cron := New(
+		WithParser(testParserWithSeconds()),
+		WithChain(),
+		WithClock(fc),
+		WithOnError(func(_ EntryID, _ string, _ error) {
+			errorCalled.Store(true)
+		}),
+	)
+
+	mustAddFunc(t, cron, everySecondSpec, done(wg))
+
+	startCron(t, cron)
+	fc.BlockUntilTimers(1)
+	fc.Advance(1 * time.Second)
+	awaitWg(t, wg)
+
+	// Small yield to ensure callback would have fired.
+	time.Sleep(5 * time.Millisecond)
+
+	if errorCalled.Load() {
+		t.Error("OnError should not be called on successful job")
+	}
+}
+
+func TestHookPanicDoesNotCrashScheduler(t *testing.T) {
+	t.Parallel()
+
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+
+	fc := newFakeClock(baseTime)
+	cron := New(
+		WithParser(testParserWithSeconds()),
+		WithChain(),
+		WithClock(fc),
+		WithLogger(DiscardLogger()),
+		WithEventHooks(EventHooks{
+			OnJobStart: func(_ EntryID, _ string) {
+				panic("start hook panic")
+			},
+			OnJobComplete: func(_ EntryID, _ string, _ time.Duration, _ error) {
+				panic("complete hook panic")
+			},
+		}),
+		WithOnError(func(_ EntryID, _ string, _ error) {
+			panic("error hook panic")
+		}),
+	)
+
+	mustAddNamedFunc(t, cron, "panicky-hooks", everySecondSpec, func(_ context.Context) error {
+		wg.Done()
+
+		return errors.New("trigger onError") //nolint:err113 // test error
+	})
+
+	startCron(t, cron)
+	fc.BlockUntilTimers(1)
+	fc.Advance(1 * time.Second)
+	awaitWg(t, wg)
+
+	// If we reach here, the scheduler survived all hook panics.
+	// Small yield to let the hook goroutine complete.
+	time.Sleep(10 * time.Millisecond)
+}

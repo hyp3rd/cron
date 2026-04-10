@@ -21,6 +21,17 @@ func mustAddFunc(t *testing.T, cron *Cron, spec string, cmd func(context.Context
 	return entryID
 }
 
+func mustAddNamedFunc(t *testing.T, cron *Cron, name, spec string, cmd func(context.Context) error) EntryID {
+	t.Helper()
+
+	entryID, err := cron.AddNamedFunc(name, spec, cmd)
+	if err != nil {
+		t.Fatalf("add named func %q (%s): %v", name, spec, err)
+	}
+
+	return entryID
+}
+
 func mustAddJob(t *testing.T, cron *Cron, spec string, job Job) EntryID {
 	t.Helper()
 

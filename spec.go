@@ -1,6 +1,10 @@
 package cron
 
-import "time"
+import (
+	"strconv"
+	"strings"
+	"time"
+)
 
 // SpecSchedule specifies a duty cycle (to the second granularity), based on a
 // traditional crontab specification. It is computed initially and stored as bit sets.
@@ -116,6 +120,21 @@ func (s *SpecSchedule) Next(candidate time.Time) time.Time {
 	}
 
 	return nextActivation.In(origLocation)
+}
+
+// String reconstructs a 6-field cron expression (second minute hour dom month
+// dow) from the schedule's bit fields. If a field matches all values in its
+// range the output is "*". The returned expression can be re-parsed by a
+// [SpecParser] configured with [Second].
+func (s *SpecSchedule) String() string {
+	return strings.Join([]string{
+		fieldString(s.Second, secondBounds()),
+		fieldString(s.Minute, minuteBounds()),
+		fieldString(s.Hour, hourBounds()),
+		fieldString(s.Dom, dayOfMonthBounds()),
+		fieldString(s.Month, monthBounds()),
+		fieldString(s.Dow, dayOfWeekBounds()),
+	}, " ")
 }
 
 type nextActivationState struct {
@@ -354,4 +373,28 @@ func dayMatches(s *SpecSchedule, candidate time.Time) bool {
 
 func hasBit(bitset uint64, position int) bool {
 	return uint64(1)<<position&bitset > 0
+}
+
+// fieldString renders a single cron field from its bitset representation.
+func fieldString(bitset uint64, bnd bounds) string {
+	allBits := getBits(bnd.min, bnd.max, 1)
+	if bitset&^starBit == allBits {
+		return "*"
+	}
+
+	return enumerateBits(bitset, bnd)
+}
+
+// enumerateBits returns a comma-separated list of the set bit positions within
+// the given bounds.
+func enumerateBits(bitset uint64, bnd bounds) string {
+	var parts []string
+
+	for idx := bnd.min; idx <= bnd.max; idx++ {
+		if bitset&(uint64(1)<<idx) != 0 {
+			parts = append(parts, strconv.FormatUint(uint64(idx), 10))
+		}
+	}
+
+	return strings.Join(parts, ",")
 }

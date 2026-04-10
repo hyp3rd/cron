@@ -343,6 +343,89 @@ func nextRunFallBackInputCases() []nextRunTestCase {
 	}
 }
 
+func TestSpecScheduleString(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		expr     string
+		expected string
+	}{
+		{"* * * * * *", "* * * * * *"},
+		{"5 * * * * *", "5 * * * * *"},
+		{"0,30 * * * * *", "0,30 * * * * *"},
+		{"0 0 1,15 * * *", "0 0 1,15 * * *"},
+		{"0 0 0 1 1 *", "0 0 0 1 1 *"},
+	}
+
+	parser := NewSpecParser(Second | Minute | Hour | Dom | Month | Dow | Descriptor)
+
+	for _, tt := range tests {
+		sched, err := parser.Parse(tt.expr)
+		if err != nil {
+			t.Fatalf("parse %q: %v", tt.expr, err)
+		}
+
+		spec, ok := sched.(*SpecSchedule)
+		if !ok {
+			t.Fatalf("expected *SpecSchedule, got %T", sched)
+		}
+
+		got := spec.String()
+		if got != tt.expected {
+			t.Errorf("String() for %q: got %q, want %q", tt.expr, got, tt.expected)
+		}
+	}
+}
+
+func TestSpecScheduleStringRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	expressions := []string{
+		"* * * * * *",
+		"5 * * * * *",
+		"0 0 * * * *",
+		"0 0 0 1 1 *",
+		"0 0,30 * * * *",
+		"0 0 9 * * 1,3,5",
+	}
+
+	parser := NewSpecParser(Second | Minute | Hour | Dom | Month | Dow | Descriptor)
+	anchor := baseTime
+
+	for _, expr := range expressions {
+		sched1, err := parser.Parse(expr)
+		if err != nil {
+			t.Fatalf("parse %q: %v", expr, err)
+		}
+
+		spec1, ok := sched1.(*SpecSchedule)
+		if !ok {
+			t.Fatalf("expected *SpecSchedule, got %T", sched1)
+		}
+
+		rendered := spec1.String()
+
+		sched2, err := parser.Parse(rendered)
+		if err != nil {
+			t.Fatalf("re-parse %q (from %q): %v", rendered, expr, err)
+		}
+
+		// Verify the next 10 fire times match.
+		cursor1, cursor2 := anchor, anchor
+
+		for idx := range 10 {
+			cursor1 = sched1.Next(cursor1)
+			cursor2 = sched2.Next(cursor2)
+
+			if !cursor1.Equal(cursor2) {
+				t.Errorf("%q round-trip mismatch at fire %d: %v != %v", expr, idx, cursor1, cursor2)
+
+				break
+			}
+		}
+	}
+}
+
 func nextRunEdgeCases() []nextRunTestCase {
 	return []nextRunTestCase{
 		{julyNinthLateNight, "0 0 0 30 Feb ?", ""},

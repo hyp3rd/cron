@@ -52,3 +52,33 @@ func WithClock(clock Clock) Option {
 		c.clock = clock
 	}
 }
+
+// ErrorFunc is called after a job returns a non-nil error. It fires in the
+// job's goroutine, so it must be safe for concurrent use.
+type ErrorFunc func(id EntryID, name string, err error)
+
+// WithOnError registers a callback invoked whenever a job returns a non-nil
+// error. The callback receives the entry's ID, name, and the error.
+func WithOnError(fn ErrorFunc) Option {
+	return func(c *Cron) {
+		c.onError = fn
+	}
+}
+
+// EventHooks contains optional callbacks for job lifecycle events. All
+// callbacks fire in the job's goroutine and must be safe for concurrent use.
+type EventHooks struct {
+	// OnJobStart is called just before a job begins execution.
+	OnJobStart func(id EntryID, name string)
+
+	// OnJobComplete is called after a job finishes, with the duration and
+	// the error (or nil).
+	OnJobComplete func(id EntryID, name string, elapsed time.Duration, err error)
+}
+
+// WithEventHooks registers lifecycle callbacks for job execution events.
+func WithEventHooks(hooks EventHooks) Option {
+	return func(c *Cron) {
+		c.hooks = hooks
+	}
+}
