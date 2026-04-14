@@ -173,7 +173,12 @@ func TestParseScheduleErrors(t *testing.T) {
 	tests := []struct{ expr, err string }{
 		{"* 5 j * * *", failedToParseIntText},
 		{"@every Xm", "failed to parse duration"},
+		{"@every 0s", "interval must be greater than zero"},
+		{"@every -5m", "interval must be greater than zero"},
 		{"@unrecognized", "unrecognized descriptor"},
+		{"CRON_TZ=UTC", "missing schedule after timezone prefix"},
+		{"CRON_TZ=", "missing timezone location"},
+		{"TZ=", "missing timezone location"},
 		{"* * * *", "expected 5 to 6 fields"},
 		{"", "empty spec string"},
 	}
@@ -208,6 +213,7 @@ func TestParseSchedule(t *testing.T) {
 		{NewStandardParser(), "CRON_TZ=UTC  5 * * * *", every5min(time.UTC)},
 		{parserWithSeconds, "CRON_TZ=Asia/Tokyo 0 5 * * * *", every5min(tokyo)},
 		{parserWithSeconds, "@every 5m", ConstantDelaySchedule{fiveMinuteDelay}},
+		{parserWithSeconds, "@every 500ms", ConstantDelaySchedule{time.Second}},
 		{parserWithSeconds, "@midnight", midnight(time.Local)},
 		{parserWithSeconds, "TZ=UTC  @midnight", midnight(time.UTC)},
 		{parserWithSeconds, "TZ=Asia/Tokyo @midnight", midnight(tokyo)},

@@ -43,10 +43,10 @@ func main() {
     ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
     defer stop()
 
-    c.Start(ctx)
+    c.Start(context.Background())
 
     <-ctx.Done()
-    c.Stop(context.Background())
+    c.Shutdown(context.Background())
 }
 ```
 
@@ -54,14 +54,17 @@ func main() {
 
 - **Standard 5-field cron expressions** (minute, hour, dom, month, dow) plus
   optional seconds via `WithSeconds()`.
-- **`context.Context` throughout** — `Start`, `Run`, `Stop`, and every `Job`
-  receive a context for cancellation and deadlines.
+- **Context-aware lifecycle** — `Start`, `Run`, `Stop`, `Shutdown`, and every
+  `Job` participate in cancellation and deadlines.
 - **`log/slog` logging** — structured, leveled logging out of the box. Default
   level is `slog.LevelWarn` to keep the scheduler quiet.
 - **`Clock` interface** — inject a fake clock via `WithClock` for deterministic,
   zero-`time.Sleep` tests.
 - **Job wrappers** — `Recover`, `SkipIfStillRunning`, `DelayIfStillRunning`,
   `Timeout`, `MaxConcurrent`, `RetryOnError`, and custom `JobWrapper` chains.
+- **Defensive configuration** — malformed `TZ=` / `CRON_TZ=` prefixes and
+  invalid `@every` intervals return parse errors; nil `With*` options keep
+  defaults.
 - **Named entries** — `AddNamedFunc` / `AddNamedJob` attach human-readable
   labels for logging and observability.
 - **Event hooks** — `WithEventHooks` for `OnJobStart` / `OnJobComplete`
@@ -98,6 +101,10 @@ func main() {
 @every 1h30m
 ```
 
+`@every` accepts positive `time.ParseDuration` values. Durations smaller than a
+second still round up to 1 second; `@every 0s` and negative durations are
+rejected as configuration errors.
+
 ### Time zones
 
 ```go
@@ -106,7 +113,25 @@ cron.New(cron.WithLocation(time.UTC))
 c.AddFunc("CRON_TZ=Asia/Tokyo 0 6 * * ?", myJob)
 ```
 
+Malformed timezone prefixes such as `CRON_TZ=` or `CRON_TZ=UTC` without a
+schedule body return parse errors instead of panicking.
+
+## Lifecycle
+
+Use `Start(ctx)` for a background scheduler and `Run(ctx)` for a blocking one.
+The context passed to `Start` or `Run` is also the parent context for every job.
+
+- `Stop(ctx)` cancels the scheduler and cancels contexts already handed to
+  running jobs before waiting for them to return.
+- `Shutdown(ctx)` stops future scheduling and waits for running jobs to finish
+  without cancelling their contexts.
+- If the `Start` / `Run` context is cancelled directly, both the scheduler and
+  job contexts are cancelled.
+
 ## Job wrappers / Chain
+
+Panic recovery is available but not enabled by default. Install `Recover`
+explicitly if you want panics turned into logged `ErrPanic` errors:
 
 ```go
 c := cron.New(cron.WithChain(
@@ -185,6 +210,11 @@ c := cron.New(cron.WithClock(fakeClock))
 ```
 
 See `clock.go` for the interface definition.
+
+## Option defaults
+
+Passing `nil` to `WithLocation`, `WithParser`, `WithLogger`, or `WithClock`
+keeps the package default instead of leaving the scheduler in an invalid state.
 
 ## Migration from robfig/cron/v3
 

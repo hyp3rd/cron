@@ -57,3 +57,31 @@ func TestWithLoggerCapturesSchedulerEvents(t *testing.T) {
 		t.Error("expected to see some actions, got:", out)
 	}
 }
+
+func TestNilOptionsPreserveDefaults(t *testing.T) {
+	t.Parallel()
+
+	cronInstance := New(
+		WithLocation(nil),
+		WithParser(nil),
+		WithLogger(nil),
+		WithClock(nil),
+	)
+
+	if cronInstance.location != time.Local {
+		t.Errorf("expected default location, got %v", cronInstance.location)
+	}
+
+	if cronInstance.logger == nil {
+		t.Fatal("expected default logger")
+	}
+
+	if cronInstance.clock == nil {
+		t.Fatal("expected default clock")
+	}
+
+	_, err := cronInstance.parser.Parse("* * * * *")
+	if err != nil {
+		t.Fatalf("expected default parser to remain active: %v", err)
+	}
+}

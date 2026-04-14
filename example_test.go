@@ -67,6 +67,28 @@ func ExampleCron_AddNamedFunc() {
 	// heartbeat
 }
 
+func ExampleCron_Shutdown() {
+	cronInstance := cron.New(cron.WithSeconds())
+	done := make(chan struct{})
+
+	cronInstance.AddFunc(exampleEverySecond, func(_ context.Context) error {
+		fmt.Println("tick")
+		close(done)
+
+		return nil
+	})
+
+	cronInstance.Start(context.Background())
+	<-done
+
+	cronInstance.Shutdown(context.Background())
+	fmt.Println("graceful stop")
+
+	// Output:
+	// tick
+	// graceful stop
+}
+
 func ExampleNextN() {
 	sched, _ := cron.ParseStandard(exampleEveryHour)
 
@@ -114,6 +136,20 @@ func ExampleTimeout() {
 
 	// Output:
 	// done
+}
+
+func ExampleRecover() {
+	job := cron.NewChain(cron.Recover(cron.DiscardLogger())).Then(
+		cron.FuncJob(func(_ context.Context) error {
+			panic("boom")
+		}),
+	)
+
+	err := job.Run(context.Background())
+	fmt.Println(errors.Is(err, cron.ErrPanic))
+
+	// Output:
+	// true
 }
 
 func ExampleMaxConcurrent() {
