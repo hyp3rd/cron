@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `EventHooks` struct with `OnJobStart` and `OnJobComplete` callbacks, set via
   `WithEventHooks` option.
 - `ErrorFunc` type and `WithOnError` option for error-only callbacks.
+- `Shutdown(ctx context.Context) error` for graceful scheduler draining without
+  cancelling contexts already handed to running jobs.
 - `example_test.go` with runnable examples for pkg.go.dev.
 - `context.Context` threading throughout the public API:
   - `Job.Run(ctx context.Context) error` — jobs receive a cancellable context
@@ -33,6 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `ErrAlreadyRunning` if a scheduler is already active.
   - `Stop(ctx context.Context) error` — cancels the scheduler, waits for
     in-flight jobs bounded by `ctx`.
+  - `Shutdown(ctx context.Context) error` — stops future scheduling and waits
+    for in-flight jobs without cancelling their contexts.
 - `Clock` interface (`Clock`, `Timer`) and `WithClock` option for deterministic
   testing without `time.Sleep`.
 - `ErrAlreadyRunning` sentinel error returned by `Run` when called twice.
@@ -50,6 +54,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Entry.WrappedJob` is now unexported (`wrappedJob`).
 - `FuncJob` signature: `func(context.Context) error` (was `func()`).
 - Minimum Go version: **1.26**.
+- `@every` rejects non-positive durations while still rounding accepted
+  sub-second intervals to one second.
+- Malformed `TZ=` / `CRON_TZ=` prefixes now return parse errors instead of
+  panicking.
+- Passing nil to `WithLocation`, `WithParser`, `WithLogger`, or `WithClock`
+  preserves the package defaults.
 
 ### Removed
 

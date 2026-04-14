@@ -31,12 +31,21 @@ type Cron struct {
 	parser     Parser
 	clock      Clock
 	nextID     EntryID
-	jobWaiter  sync.WaitGroup
-	rootCtx    context.Context //nolint:containedctx // stored to propagate cancellation to in-flight jobs
-	rootCancel context.CancelFunc
-	loopDone   chan struct{}
+	currentRun *runLifecycle
+	runs       []*runLifecycle
 	onError    ErrorFunc
 	hooks      EventHooks
+}
+
+type runLifecycle struct {
+	schedulerCtx    context.Context //nolint:containedctx // stored to coordinate graceful and forced shutdown across a scheduler run
+	schedulerCancel context.CancelFunc
+	jobCtx          context.Context //nolint:containedctx // stored to propagate
+	// cancellation semantics to in-flight jobs for a scheduler run
+	jobCancel  context.CancelFunc
+	loopDone   chan struct{}
+	jobsDone   chan struct{}
+	activeJobs int
 }
 
 // Parser turns a cron spec string into a [Schedule]. The default
@@ -48,8 +57,9 @@ type Parser interface {
 
 // Job is the unit of work scheduled by [Cron]. Implementations should honor
 // the provided context: when ctx is cancelled the job is expected to return
-// promptly. A non-nil error is logged by the scheduler but does not stop
-// future executions.
+// promptly. Job contexts are cancelled when the parent [Cron.Start] / [Cron.Run]
+// context is cancelled or when [Cron.Stop] is called. A non-nil error is logged
+// by the scheduler but does not stop future executions.
 type Job interface {
 	Run(ctx context.Context) error
 }
@@ -195,7 +205,7 @@ func (c *Cron) Entries() []Entry {
 	}
 
 	snapCh := c.snapshot
-	loopDone := c.loopDone
+	loopDone := c.currentRun.loopDone
 	c.runningMu.Unlock()
 
 	replyChan := make(chan []Entry, 1)
@@ -239,7 +249,7 @@ func (c *Cron) Remove(id EntryID) {
 	}
 
 	removeCh := c.remove
-	loopDone := c.loopDone
+	loopDone := c.currentRun.loopDone
 	c.runningMu.Unlock()
 
 	select {
@@ -252,8 +262,8 @@ func (c *Cron) Remove(id EntryID) {
 }
 
 // Start launches the scheduler in its own goroutine bound to ctx. When ctx is
-// cancelled the scheduler exits; any jobs already in flight are allowed to
-// finish. Calling Start on an already-running scheduler is a no-op.
+// cancelled the scheduler exits and running job contexts are cancelled. Calling
+// Start on an already-running scheduler is a no-op.
 func (c *Cron) Start(ctx context.Context) {
 	c.runningMu.Lock()
 	defer c.runningMu.Unlock()
@@ -262,12 +272,11 @@ func (c *Cron) Start(ctx context.Context) {
 		return
 	}
 
-	loopCtx := c.enterRunning(ctx)
-	loopDone := c.loopDone
+	run := c.enterRunning(ctx)
 
 	go func() {
-		c.schedulerLoop(loopCtx)
-		c.markStopped(loopDone)
+		c.schedulerLoop(run)
+		c.markStopped(run)
 	}()
 }
 
@@ -283,50 +292,60 @@ func (c *Cron) Run(ctx context.Context) error {
 		return ErrAlreadyRunning
 	}
 
-	loopCtx := c.enterRunning(ctx)
-	loopDone := c.loopDone
+	run := c.enterRunning(ctx)
 	c.runningMu.Unlock()
 
-	c.schedulerLoop(loopCtx)
-	c.markStopped(loopDone)
+	c.schedulerLoop(run)
+	c.markStopped(run)
 
 	return nil
 }
 
-// Stop cancels the running scheduler and waits for in-flight jobs to finish,
-// bounded by the provided context. It returns ctx.Err() if the context is
-// cancelled before all jobs complete. Calling Stop on a scheduler that is not
-// running is a no-op and returns nil.
+// Stop cancels the running scheduler and the contexts already handed to
+// in-flight jobs, then waits for those jobs to finish, bounded by the provided
+// context. It returns ctx.Err() if the context is cancelled before all jobs
+// complete. Calling Stop on a scheduler that is not running is a no-op and
+// returns nil.
 func (c *Cron) Stop(ctx context.Context) error {
-	c.runningMu.Lock()
-	if c.rootCancel != nil {
-		c.rootCancel()
-	}
+	return c.stopRuns(ctx, "stop", true)
+}
 
-	loopDone := c.loopDone
+// Shutdown stops the scheduler and waits for in-flight jobs to finish without
+// cancelling their contexts. The wait is bounded by the provided context. It
+// returns ctx.Err() if the context is cancelled before all jobs complete.
+func (c *Cron) Shutdown(ctx context.Context) error {
+	return c.stopRuns(ctx, "shutdown", false)
+}
+
+func (c *Cron) stopRuns(ctx context.Context, op string, cancelJobs bool) error {
+	c.runningMu.Lock()
+	c.cleanupCompletedRunsLocked()
+
+	runs := append([]*runLifecycle(nil), c.runs...)
+	for _, run := range runs {
+		run.schedulerCancel()
+
+		if cancelJobs {
+			run.jobCancel()
+		}
+	}
 	c.runningMu.Unlock()
 
-	if loopDone != nil {
-		select {
-		case <-loopDone:
-		case <-ctx.Done():
-			return fmt.Errorf("cron: stop: %w", ctx.Err())
+	for _, run := range runs {
+		err := waitForRunChannel(ctx, run.loopDone)
+		if err != nil {
+			return fmt.Errorf("cron: %s: %w", op, err)
 		}
 	}
 
-	done := make(chan struct{})
-
-	go func() {
-		c.jobWaiter.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return fmt.Errorf("cron: stop: %w", ctx.Err())
+	for _, run := range runs {
+		err := c.waitForRunJobs(ctx, run)
+		if err != nil {
+			return fmt.Errorf("cron: %s: %w", op, err)
+		}
 	}
+
+	return nil
 }
 
 func (c *Cron) parseAndSchedule(name, spec string, cmd Job) (EntryID, error) {
@@ -359,7 +378,7 @@ func (c *Cron) scheduleEntry(name string, sched Schedule, cmd Job) EntryID {
 	}
 
 	addCh := c.add
-	loopDone := c.loopDone
+	loopDone := c.currentRun.loopDone
 	c.runningMu.Unlock()
 
 	select {
@@ -374,26 +393,35 @@ func (c *Cron) scheduleEntry(name string, sched Schedule, cmd Job) EntryID {
 	return entry.ID
 }
 
-// enterRunning must be called with runningMu held. It sets up the root context
-// derived from the caller's ctx and marks the scheduler as running.
-func (c *Cron) enterRunning(ctx context.Context) context.Context {
-	c.running.Store(true)
-	c.rootCtx, c.rootCancel = context.WithCancel(ctx) //nolint:gosec // G118: rootCancel is stored and called by Stop
-	c.loopDone = make(chan struct{})
+// enterRunning must be called with runningMu held. It sets up independent
+// scheduler and job contexts derived from the caller's ctx and marks the
+// scheduler as running.
+func (c *Cron) enterRunning(ctx context.Context) *runLifecycle {
+	c.cleanupCompletedRunsLocked()
 
-	return c.rootCtx
+	run := &runLifecycle{
+		loopDone: make(chan struct{}),
+	}
+	run.schedulerCtx, run.schedulerCancel = context.WithCancel(ctx) //nolint:gosec // G118: cancellation is retained for Stop/Shutdown
+	run.jobCtx, run.jobCancel = context.WithCancel(ctx)             //nolint:gosec // G118: cancellation is retained for Stop/Shutdown
+
+	c.running.Store(true)
+	c.currentRun = run
+	c.runs = append(c.runs, run)
+
+	return run
 }
 
 // markStopped clears the running flag once the scheduler loop has exited. It
 // must not acquire runningMu: Schedule/Remove/Entries may hold it while
 // waiting on loopDone.
-func (c *Cron) markStopped(loopDone chan struct{}) {
+func (c *Cron) markStopped(run *runLifecycle) {
 	c.running.Store(false)
-	close(loopDone)
+	close(run.loopDone)
 }
 
 // schedulerLoop runs the scheduler until ctx is cancelled.
-func (c *Cron) schedulerLoop(ctx context.Context) {
+func (c *Cron) schedulerLoop(run *runLifecycle) {
 	c.logger.Info("start")
 
 	now := c.initializeEntries()
@@ -403,7 +431,7 @@ func (c *Cron) schedulerLoop(ctx context.Context) {
 
 		var shouldStop bool
 
-		now, shouldStop = c.processSchedulerEvent(ctx, now)
+		now, shouldStop = c.processSchedulerEvent(run, now)
 		if shouldStop {
 			return
 		}
@@ -456,19 +484,19 @@ func (c *Cron) initializeEntries() time.Time {
 	return now
 }
 
-func (c *Cron) processSchedulerEvent(ctx context.Context, now time.Time) (time.Time, bool) {
+func (c *Cron) processSchedulerEvent(run *runLifecycle, now time.Time) (time.Time, bool) {
 	timer := c.newSchedulerTimer(now)
 	defer timer.Stop()
 
 	for {
 		select {
 		case firedAt := <-timer.C():
-			return c.handleTimerFired(ctx, firedAt), false
+			return c.handleTimerFired(run, firedAt), false
 		case newEntry := <-c.add:
 			return c.handleEntryAdded(newEntry), false
 		case replyChan := <-c.snapshot:
 			replyChan <- c.entrySnapshot()
-		case <-ctx.Done():
+		case <-run.schedulerCtx.Done():
 			c.logger.Info("stop")
 
 			return now, true
@@ -488,21 +516,21 @@ func (c *Cron) newSchedulerTimer(now time.Time) Timer {
 	return c.clock.NewTimer(c.entries[0].Next.Sub(now))
 }
 
-func (c *Cron) handleTimerFired(ctx context.Context, firedAt time.Time) time.Time {
+func (c *Cron) handleTimerFired(run *runLifecycle, firedAt time.Time) time.Time {
 	now := firedAt.In(c.location)
 	c.logger.Info("wake", "now", now)
-	c.runDueEntries(ctx, now)
+	c.runDueEntries(run, now)
 
 	return now
 }
 
-func (c *Cron) runDueEntries(ctx context.Context, now time.Time) {
+func (c *Cron) runDueEntries(run *runLifecycle, now time.Time) {
 	for _, entry := range c.entries {
 		if entry.Next.After(now) || entry.Next.IsZero() {
 			break
 		}
 
-		c.startJob(ctx, entry)
+		c.startJob(run, entry)
 		entry.Prev = entry.Next
 		entry.Next = entry.Schedule.Next(now)
 		c.logger.Info("run", "now", now, "entry", entry.ID, "name", entry.Name, "next", entry.Next)
@@ -530,10 +558,37 @@ func (c *Cron) handleEntryRemoved(id EntryID) time.Time {
 // configured [EventHooks] and [ErrorFunc]. Non-nil errors are logged at Warn
 // level and do not affect future executions. Hook panics are recovered and
 // logged so that observability callbacks cannot crash the scheduler.
-func (c *Cron) startJob(ctx context.Context, entry *Entry) {
-	c.jobWaiter.Go(func() {
-		c.executeJob(ctx, entry)
-	})
+func (c *Cron) startJob(run *runLifecycle, entry *Entry) {
+	c.runningMu.Lock()
+	if run.activeJobs == 0 {
+		run.jobsDone = make(chan struct{})
+	}
+
+	run.activeJobs++
+	c.runningMu.Unlock()
+
+	go func() {
+		defer c.finishJob(run)
+
+		c.executeJob(run.jobCtx, entry)
+	}()
+}
+
+func (c *Cron) finishJob(run *runLifecycle) {
+	c.runningMu.Lock()
+	defer c.runningMu.Unlock()
+
+	if run.activeJobs == 0 {
+		return
+	}
+
+	run.activeJobs--
+	if run.activeJobs == 0 && run.jobsDone != nil {
+		close(run.jobsDone)
+		run.jobsDone = nil
+	}
+
+	c.cleanupCompletedRunsLocked()
 }
 
 func (c *Cron) executeJob(ctx context.Context, entry *Entry) {
@@ -592,4 +647,66 @@ func (c *Cron) entrySnapshot() []Entry {
 
 func (c *Cron) removeEntry(id EntryID) {
 	c.entries = slices.DeleteFunc(c.entries, func(e *Entry) bool { return e.ID == id })
+}
+
+func (c *Cron) waitForRunJobs(ctx context.Context, run *runLifecycle) error {
+	c.runningMu.Lock()
+	if run.activeJobs == 0 {
+		c.cleanupCompletedRunsLocked()
+		c.runningMu.Unlock()
+
+		return nil
+	}
+
+	jobsDone := run.jobsDone
+	c.runningMu.Unlock()
+
+	return waitForRunChannel(ctx, jobsDone)
+}
+
+func (c *Cron) cleanupCompletedRunsLocked() {
+	if len(c.runs) == 0 {
+		return
+	}
+
+	filtered := c.runs[:0]
+	for _, run := range c.runs {
+		if run.activeJobs == 0 && isClosed(run.loopDone) {
+			if c.currentRun == run {
+				c.currentRun = nil
+			}
+
+			continue
+		}
+
+		filtered = append(filtered, run)
+	}
+
+	c.runs = filtered
+}
+
+func waitForRunChannel(ctx context.Context, done <-chan struct{}) error {
+	if done == nil {
+		return nil
+	}
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("context done: %w", ctx.Err())
+	}
+}
+
+func isClosed(done <-chan struct{}) bool {
+	if done == nil {
+		return false
+	}
+
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
 }

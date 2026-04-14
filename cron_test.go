@@ -117,6 +117,16 @@ func newFakeWithSeconds() (*Cron, *fakeClock) {
 	return New(WithParser(testParserWithSeconds()), WithChain(), WithClock(fc)), fc
 }
 
+func newQuietFakeWithSeconds() (*Cron, *fakeClock) {
+	fc := newFakeClock(baseTime)
+
+	return New(
+		WithParser(testParserWithSeconds()),
+		WithClock(fc),
+		WithLogger(DiscardLogger()),
+	), fc
+}
+
 func TestFuncPanicRecovery(t *testing.T) {
 	t.Parallel()
 
@@ -213,6 +223,33 @@ func TestStopCausesJobsToNotRun(t *testing.T) {
 
 	if c := calls.Load(); c != 0 {
 		t.Fatalf("expected no job runs after stop, got %d", c)
+	}
+}
+
+func TestShutdownCausesJobsToNotRun(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int64
+
+	cron, fc := newFakeWithSeconds()
+	cron.Start(context.Background())
+
+	err := cron.Shutdown(context.Background())
+	if err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	mustAddFunc(t, cron, everySecondSpec, func(_ context.Context) error {
+		calls.Add(1)
+
+		return nil
+	})
+
+	fc.Advance(2 * time.Second)
+	time.Sleep(10 * time.Millisecond)
+
+	if c := calls.Load(); c != 0 {
+		t.Fatalf("expected no job runs after shutdown, got %d", c)
 	}
 }
 
@@ -516,6 +553,115 @@ func TestStopWithoutStart(t *testing.T) {
 	}
 }
 
+func TestShutdownWithoutStart(t *testing.T) {
+	t.Parallel()
+
+	cron := New()
+
+	err := cron.Shutdown(context.Background())
+	if err != nil {
+		t.Errorf("unexpected shutdown error: %v", err)
+	}
+}
+
+func TestStopCancelsRunningJobContext(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{}, 1)
+	canceled := make(chan struct{}, 1)
+
+	cron, fc := newQuietFakeWithSeconds()
+
+	mustAddFunc(t, cron, everySecondSpec, func(ctx context.Context) error {
+		signalJobStarted(started)
+		<-ctx.Done()
+		signalJobStarted(canceled)
+
+		return ctx.Err()
+	})
+
+	cron.Start(context.Background())
+	fc.BlockUntilTimers(1)
+	fc.Advance(1 * time.Second)
+	waitForJobStarted(t, started)
+
+	err := cron.Stop(context.Background())
+	if err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+
+	waitForJobStarted(t, canceled)
+}
+
+func TestShutdownLetsRunningJobsFinish(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{}, 1)
+	finished := make(chan struct{}, 1)
+	allowFinish := make(chan struct{})
+
+	var (
+		calls    atomic.Int64
+		canceled atomic.Bool
+	)
+
+	cron, fc := newQuietFakeWithSeconds()
+
+	mustAddFunc(t, cron, everySecondSpec, func(ctx context.Context) error {
+		calls.Add(1)
+		signalJobStarted(started)
+
+		select {
+		case <-allowFinish:
+			signalJobStarted(finished)
+
+			return nil
+		case <-ctx.Done():
+			canceled.Store(true)
+			signalJobStarted(finished)
+
+			return ctx.Err()
+		}
+	})
+
+	cron.Start(context.Background())
+	fc.BlockUntilTimers(1)
+	fc.Advance(1 * time.Second)
+	waitForJobStarted(t, started)
+
+	shutdownDone := make(chan error, 1)
+
+	go func() {
+		shutdownDone <- cron.Shutdown(context.Background())
+	}()
+
+	expectErrorChannelPending(t, shutdownDone, 20*time.Millisecond, "expected Shutdown to wait for the running job")
+
+	close(allowFinish)
+
+	err := waitForErrorResult(t, shutdownDone, awaitTimeout, "shutdown")
+	if err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	waitForJobStarted(t, finished)
+
+	if canceled.Load() {
+		t.Fatal("expected Shutdown not to cancel the running job context")
+	}
+
+	if calls.Load() != 1 {
+		t.Fatalf("expected exactly one run before shutdown, got %d", calls.Load())
+	}
+
+	fc.Advance(2 * time.Second)
+	time.Sleep(10 * time.Millisecond)
+
+	if calls.Load() != 1 {
+		t.Fatalf("expected no future runs after shutdown, got %d", calls.Load())
+	}
+}
+
 type testJob struct {
 	wg   *sync.WaitGroup
 	name string
@@ -811,6 +957,14 @@ func TestStopAndWait(t *testing.T) {
 	t.Run("a couple fast jobs and a slow job added, waits for slow job", testStopAndWaitSlowJob)
 }
 
+func TestShutdownAndWait(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nothing running, returns immediately", testShutdownAndWaitNothingRunning)
+	t.Run("repeated calls to Shutdown", testShutdownAndWaitRepeatedCalls)
+	t.Run("a slow job blocks until it completes", testShutdownAndWaitSlowJob)
+}
+
 func TestMultiThreadedStartAndStop(t *testing.T) {
 	t.Parallel()
 
@@ -860,6 +1014,18 @@ func testStopAndWaitNothingRunning(t *testing.T) {
 	}
 }
 
+func testShutdownAndWaitNothingRunning(t *testing.T) {
+	t.Parallel()
+
+	cron, _ := newFakeWithSeconds()
+	cron.Start(context.Background())
+
+	err := cron.Shutdown(context.Background())
+	if err != nil {
+		t.Errorf("unexpected shutdown error: %v", err)
+	}
+}
+
 func testStopAndWaitRepeatedCalls(t *testing.T) {
 	t.Parallel()
 
@@ -873,6 +1039,22 @@ func testStopAndWaitRepeatedCalls(t *testing.T) {
 	err := cron.Stop(context.Background())
 	if err != nil {
 		t.Errorf(unexpectedStopError, err)
+	}
+}
+
+func testShutdownAndWaitRepeatedCalls(t *testing.T) {
+	t.Parallel()
+
+	cron, _ := newFakeWithSeconds()
+	cron.Start(context.Background())
+
+	_ = cron.Shutdown(context.Background()) //nolint:errcheck // first shutdown
+
+	time.Sleep(time.Millisecond)
+
+	err := cron.Shutdown(context.Background())
+	if err != nil {
+		t.Errorf("unexpected shutdown error: %v", err)
 	}
 }
 
@@ -902,38 +1084,74 @@ func testStopAndWaitFastJobs(t *testing.T) {
 func testStopAndWaitSlowJob(t *testing.T) {
 	t.Parallel()
 
+	runSlowJobWaitTest(t, "Stop", func(cronInstance *Cron, ctx context.Context) error {
+		return cronInstance.Stop(ctx)
+	})
+}
+
+func testShutdownAndWaitSlowJob(t *testing.T) {
+	t.Parallel()
+
+	runSlowJobWaitTest(t, "Shutdown", func(cronInstance *Cron, ctx context.Context) error {
+		return cronInstance.Shutdown(ctx)
+	})
+}
+
+func runSlowJobWaitTest(t *testing.T, operation string, halt func(*Cron, context.Context) error) {
+	t.Helper()
+
 	slowJobStarted := make(chan struct{}, 1)
-	cron := newWithSeconds()
-	mustAddFunc(t, cron, everySecondWithSeconds, noop)
-	cron.Start(context.Background())
-	mustAddFunc(t, cron, everySecondWithSeconds, func(_ context.Context) error {
+	cronInstance := newWithSeconds()
+	mustAddFunc(t, cronInstance, everySecondWithSeconds, noop)
+	cronInstance.Start(context.Background())
+	mustAddFunc(t, cronInstance, everySecondWithSeconds, func(_ context.Context) error {
 		signalJobStarted(slowJobStarted)
 		time.Sleep(slowStopJobDelay)
 
 		return nil
 	})
-	mustAddFunc(t, cron, everySecondWithSeconds, noop)
+	mustAddFunc(t, cronInstance, everySecondWithSeconds, noop)
 
 	waitForJobStarted(t, slowJobStarted)
 
-	// A short deadline should trip because the slow job is still running.
 	shortCtx, cancelShort := context.WithTimeout(context.Background(), waitForStopCheck)
-
-	err := cron.Stop(shortCtx)
+	err := halt(cronInstance, shortCtx)
 
 	cancelShort()
 
 	if err == nil {
-		t.Error("expected Stop to time out while slow job was running")
+		t.Errorf("expected %s to time out while slow job was running", operation)
 	}
 
-	// A longer deadline should succeed once the slow job wraps up.
 	longCtx, cancelLong := context.WithTimeout(context.Background(), waitForStopCompletion)
 	defer cancelLong()
 
-	err = cron.Stop(longCtx)
+	err = halt(cronInstance, longCtx)
 	if err != nil {
-		t.Errorf("expected Stop to succeed, got %v", err)
+		t.Errorf("expected %s to succeed, got %v", operation, err)
+	}
+}
+
+func expectErrorChannelPending(t *testing.T, done <-chan error, timeout time.Duration, message string) {
+	t.Helper()
+
+	select {
+	case err := <-done:
+		t.Fatalf("%s, got %v", message, err)
+	case <-time.After(timeout):
+	}
+}
+
+func waitForErrorResult(t *testing.T, done <-chan error, timeout time.Duration, label string) error {
+	t.Helper()
+
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(timeout):
+		t.Fatalf("%s did not complete in time", label)
+
+		return nil
 	}
 }
 

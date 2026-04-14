@@ -16,8 +16,9 @@ It requires Go 1.26 or later.
 # Usage
 
 Callers may register Funcs to be invoked on a given schedule. Cron will run
-them in their own goroutines. All jobs receive a [context.Context] that is
-cancelled when the scheduler is stopped.
+them in their own goroutines. All jobs receive a [context.Context] derived from
+the [Cron.Start] / [Cron.Run] context. That job context is cancelled when the
+parent context is cancelled or when [Cron.Stop] is called.
 
 	c := cron.New()
 	c.AddFunc("30 * * * *", func(ctx context.Context) error {
@@ -41,7 +42,20 @@ cancelled when the scheduler is stopped.
 	// Inspect the cron job entries' next and previous run times.
 	inspect(c.Entries())
 	..
-	c.Stop(ctx)  // Stop the scheduler and wait for in-flight jobs.
+	c.Stop(ctx)      // Cancel running jobs, then wait.
+	c.Shutdown(ctx)  // Graceful drain without cancelling running jobs.
+
+# Lifecycle
+
+Cron exposes two shutdown modes:
+
+  - [Cron.Stop] cancels the scheduler and the contexts already handed to running
+    jobs, then waits for those jobs to return.
+  - [Cron.Shutdown] stops future scheduling and waits for running jobs to
+    finish without cancelling their contexts.
+
+If the context passed to [Cron.Start] or [Cron.Run] is cancelled directly, both
+the scheduler and job contexts are cancelled.
 
 # CRON Expression Format
 
@@ -138,6 +152,9 @@ where "duration" is a string accepted by time.ParseDuration
 For example, "@every 1h30m10s" would indicate a schedule that activates after
 1 hour, 30 minutes, 10 seconds, and then every interval after that.
 
+Intervals must be greater than zero. Sub-second intervals are accepted and
+rounded up to one second.
+
 Note: The interval does not take the job runtime into account. For example,
 if a job takes 3 minutes to run, and it is scheduled to run every 5 minutes,
 it will have only 2 minutes of idle time between each run.
@@ -169,6 +186,8 @@ For example:
 
 The prefix "TZ=(TIME ZONE)" is also supported for legacy compatibility.
 
+Malformed timezone prefixes return parse errors rather than panicking.
+
 Be aware that jobs scheduled during daylight-savings leap-ahead transitions will
 not be run!
 
@@ -178,10 +197,13 @@ A Cron runner may be configured with a chain of job wrappers to add
 cross-cutting functionality to all submitted jobs. For example, they may be used
 to achieve the following effects:
 
-  - Recover any panics from jobs (activated by default)
+  - Recover panics from jobs by installing [Recover]
   - Delay a job's execution if the previous run hasn't completed yet
   - Skip a job's execution if the previous run hasn't completed yet
   - Log each job's invocations
+
+Panic recovery is not enabled by default. To preserve scheduler availability
+when jobs may panic, install [Recover] explicitly via [WithChain] or [NewChain].
 
 Install wrappers for all jobs added to a cron using the [WithChain] option:
 
@@ -254,6 +276,11 @@ custom [*slog.Logger] via [WithLogger] to control log level and destination:
 		cron.WithLogger(slog.New(
 			slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}),
 		)))
+
+# Option defaults
+
+Passing nil to [WithLocation], [WithParser], [WithLogger], or [WithClock] keeps
+the package default instead of leaving the scheduler in an invalid state.
 
 # Implementation
 

@@ -75,6 +75,15 @@ Returns `cron.ErrAlreadyRunning` if a scheduler is already active.
 `Stop` cancels the scheduler and waits for in-flight jobs, bounded by `ctx`. It
 returns `ctx.Err()` if the deadline elapses before all jobs finish.
 
+### Shutdown (graceful drain)
+
+If you want to stop scheduling new work without cancelling contexts already
+handed to running jobs, use:
+
+```go
+err := c.Shutdown(ctx)
+```
+
 ## 4. Logger — `log/slog` replaces custom interface
 
 The custom `Logger` interface, `PrintfLogger`, and `VerbosePrintfLogger` are
@@ -131,6 +140,13 @@ if errors.Is(err, cron.ErrPanic) {
 }
 ```
 
+`Recover` is not enabled by default. To preserve v3-style panic recovery,
+install it explicitly:
+
+```go
+cron.New(cron.WithChain(cron.Recover(logger)))
+```
+
 ## 9. Removed symbols
 
 | Removed                  | Replacement                |
@@ -149,7 +165,8 @@ if errors.Is(err, cron.ErrPanic) {
 
 1. Update import path to `github.com/hyp3rd/cron/v4`.
 2. Add `context.Context` parameter and `error` return to all `Job` implementations and `FuncJob` / `AddFunc` closures.
-3. Pass a `context.Context` to `Start`, `Run`, and `Stop`.
+3. Pass a `context.Context` to `Start`, `Run`, and `Stop`, and use
+   `Shutdown(ctx)` when you need graceful draining instead of cancellation.
 4. Replace `Logger`/`PrintfLogger`/`VerbosePrintfLogger` with `*slog.Logger`.
 5. Rename `NewParser` calls to `NewSpecParser`.
 6. Replace `Entry.WrappedJob` usage with `Entry.Job`.

@@ -23,6 +23,9 @@ var (
 	errRangeStepMustBePositive = errors.New("step of range should be a positive number")
 	errNegativeNumber          = errors.New("negative number not allowed")
 	errUnrecognizedDescriptor  = errors.New("unrecognized descriptor")
+	errMissingLocationName     = errors.New("missing timezone location")
+	errMissingLocationSpec     = errors.New("missing schedule after timezone prefix")
+	errNonPositiveInterval     = errors.New("interval must be greater than zero")
 )
 
 const (
@@ -316,15 +319,28 @@ func extractLocation(spec string) (string, *time.Location, error) {
 		return spec, loc, nil
 	}
 
-	i := strings.Index(spec, " ")
-	eq := strings.Index(spec, "=")
-
-	loc, err := time.LoadLocation(spec[eq+1 : i])
-	if err != nil {
-		return "", nil, fmt.Errorf("provided bad location %s: %w", spec[eq+1:i], err)
+	fields := strings.Fields(spec)
+	if len(fields) == 0 {
+		return "", nil, errEmptySpec
 	}
 
-	return strings.TrimSpace(spec[i:]), loc, nil
+	eq := strings.Index(fields[0], "=")
+
+	locationName := fields[0][eq+1:]
+	if locationName == "" {
+		return "", nil, fmt.Errorf("%w: %s", errMissingLocationName, spec)
+	}
+
+	if len(fields) == 1 {
+		return "", nil, fmt.Errorf("%w: %s", errMissingLocationSpec, spec)
+	}
+
+	loc, err := time.LoadLocation(locationName)
+	if err != nil {
+		return "", nil, fmt.Errorf("provided bad location %s: %w", locationName, err)
+	}
+
+	return strings.Join(fields[1:], " "), loc, nil
 }
 
 func parseScheduleFields(fields []string, loc *time.Location) (*SpecSchedule, error) {
@@ -593,15 +609,22 @@ func parseDescriptor(descriptor string, loc *time.Location) (Schedule, error) {
 		}, nil
 	}
 
-	const every = "@every "
-	if strings.HasPrefix(descriptor, every) {
-		duration, err := time.ParseDuration(descriptor[len(every):])
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse duration %s: %w", descriptor, err)
-		}
-
-		return Every(duration), nil
+	if strings.HasPrefix(descriptor, "@every ") {
+		return parseEveryDescriptor(descriptor)
 	}
 
 	return nil, fmt.Errorf(wrappedErrorWithValueFormat, errUnrecognizedDescriptor, descriptor)
+}
+
+func parseEveryDescriptor(descriptor string) (Schedule, error) {
+	duration, err := time.ParseDuration(descriptor[len("@every "):])
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse duration %s: %w", descriptor, err)
+	}
+
+	if duration <= 0 {
+		return nil, fmt.Errorf("%w: %s", errNonPositiveInterval, descriptor)
+	}
+
+	return Every(duration), nil
 }
